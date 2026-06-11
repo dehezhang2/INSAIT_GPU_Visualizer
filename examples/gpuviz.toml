@@ -1,0 +1,53 @@
+# gpuviz.toml — drop this at the ROOT of a project repo, then register the repo
+# in the WebUI (Projects tab → paste the repo path → Add).
+#
+# This file is the *definition* of the jobs this project can submit. The WebUI
+# handles *management* (submit / monitor / migrate / read logs). Editing job
+# parameters in the GUI at submit time does NOT touch this file — the real
+# sbatch actually submitted is snapshotted into <repo>/.gpuviz/submissions/.
+
+[project]
+name = "invariant-bench"          # shown in the WebUI
+
+# Values every [[job]] inherits (each job can override any of them).
+[defaults]
+gpu_type  = "h200"                # leave empty for "any GPU type" (schedules sooner)
+partition = "batch"
+cpus      = 12
+mem       = "0"                   # 0 = all memory on the node
+time      = "8:00:00"             # keep tight → backfill can slot you in earlier
+account   = ""                    # blank = your default account
+output    = "logs/slurm-%x-%j.out"
+setup     = "source ~/.bashrc && conda activate invbench"   # runs before `command`
+
+# --- a normal training job, command written inline -------------------------
+[[job]]
+key     = "sft-aug"              # unique id within this repo
+name    = "sft_internvl_aug"     # Slurm job name (defaults to key)
+gpus    = 4
+time    = "3-00:00:00"
+command = "srun python train_sft.py --config configs/aug.yaml"
+# Data this job needs present before it can run (paths are relative to the repo
+# unless absolute; $USER / $REPO expand). The WebUI shows ✓ / ⚠ / ✗ / ⇄ per item.
+needs = [
+  { path = "data/aug", min_gb = 200 },
+  { path = "/scratch/$USER/ckpts/internvl-base", site = "msp3" },  # ⇄ on another site → stage first
+]
+
+# --- reuse an existing sbatch file as-is -----------------------------------
+# GUI overrides (gpus/time/nodelist/…) are applied as `sbatch` CLI flags, which
+# win over the #SBATCH lines inside the file. The file itself is left untouched.
+[[job]]
+key         = "eval"
+gpus        = 1
+time        = "2-00:00:00"
+script_file = "scripts/eval_internvl.sbatch"
+
+# --- a placeholder / holder job --------------------------------------------
+# Grabs GPUs and idles (sleep infinity). Use it to hold an allocation, then
+# "swap→" it for a real eval job on the same node (make-before-break).
+[[job]]
+key  = "holder"
+kind = "holder"
+gpus = 8
+time = "8:00:00"
