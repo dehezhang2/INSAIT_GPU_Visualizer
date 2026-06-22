@@ -121,28 +121,53 @@ def new_draft_defaults() -> dict:
     }
 
 
-# A holder/placeholder job: grabs GPUs and idles so you can hand the node off to
-# a real eval job later without losing the allocation.
+# A holder grabs the GPUs and keeps them lightly busy so it isn't flagged idle by
+# util watchdogs — while staying instantly swappable for a real job. Low duty
+# cycle (HOLD_BUSY seconds of work, then HOLD_IDLE seconds sleep) keeps util
+# clearly non-zero without burning much power. Needs `python` with torch+CUDA on
+# PATH (provide it via the job's `setup`); falls back to a plain hold otherwise.
+HOLDER_SCRIPT = (
+    "set -uo pipefail\n"
+    "echo \"[holder] $(hostname): holding ${SLURM_GPUS_ON_NODE:-?} GPU(s), "
+    "job ${SLURM_JOB_ID:-?} — swap me with a real job anytime\"\n"
+    "echo \"[holder] tune util: HOLD_BUSY=${HOLD_BUSY:-0.5}s work / "
+    "HOLD_IDLE=${HOLD_IDLE:-1.5}s idle, HOLD_SIZE=${HOLD_SIZE:-4096}\"\n"
+    "python - <<'PYEOF' || { echo \"[holder] no torch/CUDA -> plain idle hold\"; "
+    "sleep infinity; }\n"
+    "import os, time\n"
+    "try:\n"
+    "    import torch\n"
+    "    assert torch.cuda.is_available()\n"
+    "except Exception:\n"
+    "    raise SystemExit(1)\n"
+    "n = int(os.environ.get('HOLD_SIZE', '4096'))\n"
+    "busy = float(os.environ.get('HOLD_BUSY', '0.5'))\n"
+    "idle = float(os.environ.get('HOLD_IDLE', '1.5'))\n"
+    "devs = list(range(torch.cuda.device_count()))\n"
+    "mats = {d: [torch.randn(n, n, device=f'cuda:{d}') for _ in range(2)] for d in devs}\n"
+    "print(f'[holder] warming {len(devs)} GPU(s) size={n} duty={busy}/{busy+idle}', flush=True)\n"
+    "while True:\n"
+    "    t0 = time.time()\n"
+    "    while time.time() - t0 < busy:\n"
+    "        for d in devs:\n"
+    "            a, b = mats[d]\n"
+    "            mats[d][0] = (a @ b).clamp_(-1.0, 1.0)\n"
+    "    torch.cuda.synchronize()\n"
+    "    time.sleep(idle)\n"
+    "PYEOF\n"
+)
+
+
 def holder_defaults(gpus: int = 1, gpu_type: str = "h200", time: str = "8:00:00") -> dict:
     d = new_draft_defaults()
     d.update({
         "name": "HOLDER-swap-me",
+        "kind": "holder",
         "gpus": gpus,
         "gpu_type": gpu_type,
         "time": time,
         "output": "logs/holder-%x-%j.out",
-        "script": (
-            "set -uo pipefail\n"
-            "echo \"[holder] holding $SLURM_GPUS_ON_NODE GPU(s) on $(hostname)\"\n"
-            "echo \"[holder] jobid=$SLURM_JOB_ID — swap me with a real eval job anytime\"\n"
-            "# Idle-hold the allocation. Replace this with your eval command, or\n"
-            "# scancel + resubmit the real job onto the same node.\n"
-            "# Optional light keepalive so the GPU isn't flagged idle by watchdogs:\n"
-            "#   while true; do python -c 'import torch,time;\\\n"
-            "#     x=torch.zeros(1,device=\"cuda\");\\\n"
-            "#     time.sleep(30)'; done\n"
-            "sleep infinity\n"
-        ),
+        "script": HOLDER_SCRIPT,
     })
     return d
 
@@ -162,6 +187,8 @@ def _body(d: dict) -> str:
         body = d["script"]
     elif d.get("command"):
         body = d["command"]
+    elif d.get("kind") == "holder":
+        body = HOLDER_SCRIPT  # catalog holder with no explicit command
     else:
         body = new_draft_defaults()["script"]
     setup = (d.get("setup") or "").strip()
@@ -197,7 +224,12 @@ def render(draft: dict) -> str:
     ]
     lines.extend([x for x in out if x])
     lines.append("")
-    lines.append(_body(d))
+    # decide the body from the RAW spec (so a catalog holder with no explicit
+    # script isn't shadowed by the default placeholder injected above), but carry
+    # `setup` from the merged dict
+    raw = dict(draft or {})
+    raw.setdefault("setup", d.get("setup"))
+    lines.append(_body(raw))
     return "\n".join(lines) + "\n"
 
 
