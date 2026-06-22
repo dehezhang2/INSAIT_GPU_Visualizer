@@ -46,9 +46,12 @@ def get(mid: int) -> dict | None:
         return _migrations.get(mid)
 
 
-def create(src_job_id, target_node, submit_fn, label: str = "") -> dict:
+def create(src_job_id, target_node, submit_fn, label: str = "",
+           timeout_s: float = 1800) -> dict:
     """Start a migration. submit_fn() must submit the new job and return its id.
-    The old job is NOT touched until the new one is RUNNING."""
+    The old job is NOT touched until the new one is RUNNING. If the new job has
+    not started within timeout_s, give up: cancel the still-pending clone and
+    keep the original (so a late start can't leave both running)."""
     global _seq
     with _lock:
         _seq += 1
@@ -62,6 +65,7 @@ def create(src_job_id, target_node, submit_fn, label: str = "") -> dict:
             "log": [],
             "created_at": _now(),
             "updated_at": _now(),
+            "timeout_s": timeout_s,
         }
         _migrations[m["id"]] = m
     _log(m, f"submitting new job → {target_node}")
@@ -105,6 +109,18 @@ def clear_finished():
 
 def _step(m: dict):
     if m["state"] != "waiting" or not m.get("new_job_id"):
+        return
+    # give up if the clone never starts — and cancel it, so a late start can't
+    # leave the original AND the clone both running
+    timeout = m.get("timeout_s") or 0
+    if timeout and (_now() - m["created_at"]) > timeout:
+        try:
+            slurm.cancel(m["new_job_id"])
+        except Exception:  # noqa: BLE001
+            pass
+        m["state"] = "failed"
+        mins = round(timeout / 60)
+        _log(m, f"timed out (clone未在 {mins} 分钟内启动);已取消克隆,保留原任务")
         return
     st = slurm.job_state(m["new_job_id"])
     if st in _RUN_OK:

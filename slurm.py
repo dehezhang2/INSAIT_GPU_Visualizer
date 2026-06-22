@@ -183,12 +183,179 @@ def my_partitions() -> set[str]:
 # ---------------------------------------------------------------------------
 
 
+_IDX_RE = re.compile(r"\(IDX:([\d,\-]+)\)")
+
+
+def _parse_idxs(s: str | None) -> list[int]:
+    """'gpu:h200:4(IDX:0-2,5)' -> [0,1,2,5]."""
+    m = _IDX_RE.search(s or "")
+    if not m:
+        return []
+    out: list[int] = []
+    for part in m.group(1).split(","):
+        if "-" in part:
+            a, b = part.split("-")
+            out.extend(range(int(a), int(b) + 1))
+        else:
+            out.append(int(part))
+    return out
+
+
+def occupancy(ttl: float = 8.0) -> dict:
+    """node name -> [{job_id,user,name,gpus,gpu_idxs}] for all RUNNING jobs
+    cluster-wide (who is occupying which GPUs on which node)."""
+
+    def fn():
+        data = json.loads(_run(["squeue", "-t", "RUNNING,COMPLETING", "--json"],
+                               timeout=30))
+        occ: dict[str, list[dict]] = {}
+        for j in data.get("jobs", []):
+            gres = j.get("gres_detail") or []
+            alloc = ((j.get("job_resources") or {}).get("nodes") or {}).get("allocation") or []
+            for i, a in enumerate(alloc):
+                nname = a.get("name")
+                if not nname:
+                    continue
+                g = gres[i] if i < len(gres) else ""
+                gp = _parse_gres_gpus(g)
+                occ.setdefault(nname, []).append({
+                    "job_id": _num(j.get("job_id")),
+                    "user": j.get("user_name") or "",
+                    "name": j.get("name") or "",
+                    "gpus": sum(gp.values()),
+                    "gpu_idxs": _parse_idxs(g),
+                    "cpus": (a.get("cpus") or {}).get("count")
+                            if isinstance(a.get("cpus"), dict) else a.get("cpus"),
+                    "start_time": _num(j.get("start_time")),
+                    "time_limit_min": _num(j.get("time_limit")),
+                    "partition": j.get("partition") or "",
+                })
+        for v in occ.values():
+            v.sort(key=lambda x: (-x["gpus"], x["user"]))
+        return occ
+
+    return _cached("occ", ttl, fn)
+
+
 def _expand_hostlist(expr: str) -> list[str]:
     try:
         return [x.strip() for x in _run(["scontrol", "show", "hostnames", expr]).splitlines()
                 if x.strip()]
     except SlurmError:
         return []
+
+
+def sprio(ttl: float = 8.0) -> dict:
+    """job_id(int) -> priority factor breakdown from `sprio` (weighted values).
+
+    On this cluster the meaningful factors are age, fairshare, qos and NICE
+    (negative nice = a manual priority boost); assoc/jobsize/site are 0."""
+
+    def fn():
+        try:
+            out = _run(["sprio", "-h", "-o", "%i|%Y|%A|%F|%Q|%P|%N"], timeout=20)
+        except SlurmError:
+            return {}
+
+        def iv(x):
+            try:
+                return int(float(x))
+            except (ValueError, TypeError):
+                return 0
+
+        m = {}
+        for line in out.splitlines():
+            c = line.split("|")
+            if len(c) < 7:
+                continue
+            try:
+                jid = int(re.split(r"[_\[]", c[0].strip())[0])
+            except ValueError:
+                continue
+            nice = iv(c[6])
+            m[jid] = {
+                "total": iv(c[1]), "age": iv(c[2]), "fairshare": iv(c[3]),
+                "qos": iv(c[4]), "partition": iv(c[5]), "nice": nice,
+                "nice_boost": -nice if nice < 0 else 0,
+            }
+        return m
+
+    return _cached("sprio", ttl, fn)
+
+
+def pending_jobs(ttl: float = 8.0) -> list[dict]:
+    """All PENDING jobs cluster-wide, parsed for node-queue matching.
+
+    The scheduler here does not expose planned node placement, so a job's link to
+    a node is via an explicit --nodelist (required_nodes) or resource match
+    (same partition + GPU type). `required`/`excluded` are expanded node sets."""
+
+    def fn():
+        data = json.loads(_run(["squeue", "-t", "PENDING", "--json"], timeout=30))
+        prio = sprio()
+        hl: dict[str, set] = {}
+
+        def expand(expr):
+            if not expr or expr == "(null)":
+                return None
+            if expr not in hl:
+                hl[expr] = set(_expand_hostlist(expr))
+            return hl[expr]
+
+        out = []
+        for j in data.get("jobs", []):
+            gpus, gtype = _parse_tres_gpu(j.get("tres_req_str"))
+            if not gpus:
+                gpus, gtype = _parse_tres_gpu(j.get("tres_per_node"))
+            out.append({
+                "id": _job_id_str(j),
+                "job_id": _num(j.get("job_id")),
+                "user": j.get("user_name") or "",
+                "name": j.get("name") or "",
+                "partition": j.get("partition") or "",
+                "priority": _num(j.get("priority"), 0),
+                "qos": j.get("qos") or "",
+                "reason": j.get("state_reason") or "",
+                "gpus": gpus,
+                "gpu_type": gtype,
+                "required": expand(j.get("required_nodes")),
+                "excluded": expand(j.get("excluded_nodes")) or set(),
+                "submit_time": _num(j.get("submit_time")),
+                "sprio": prio.get(_num(j.get("job_id"))),
+            })
+        return out
+
+    return _cached("pending", ttl, fn)
+
+
+def _node_queue(name: str, gtypes: list[str], nparts: set, pend: list[dict],
+                cap: int = 20) -> tuple[list[dict], int, int]:
+    """Pending jobs that could land on this node, in scheduling order (actively
+    waiting first by priority; held/dependency jobs sink to the bottom)."""
+    q = []
+    for p in pend:
+        if not p["gpus"]:
+            continue  # only GPU jobs queue for a GPU node
+        if p["partition"] and p["partition"] not in nparts:
+            continue
+        if p["required"] is not None and name not in p["required"]:
+            continue
+        if name in p["excluded"]:
+            continue
+        if p["gpu_type"] and p["gpu_type"] not in gtypes:
+            continue
+        reason = p["reason"]
+        waiting = not (reason.startswith("JobHeld") or reason in ("Dependency", "BeginTime"))
+        q.append({
+            "id": p["id"], "user": p["user"], "name": p["name"],
+            "gpus": p["gpus"], "gpu_type": p["gpu_type"], "priority": p["priority"],
+            "reason": reason, "qos": p["qos"],
+            "pinned": p["required"] is not None, "waiting": waiting,
+            "sprio": p["sprio"],
+        })
+    q.sort(key=lambda x: (not x["waiting"], not x["pinned"], -(x["priority"] or 0)))
+    active = sum(1 for x in q if x["waiting"])
+    return q[:cap], len(q), active
 
 
 def reservations(ttl: float = 60) -> dict:
@@ -228,7 +395,10 @@ def reservations(ttl: float = 60) -> dict:
             for nm in _expand_hostlist(nodes_expr):
                 # if any reservation includes me, treat node as mine-reservable
                 cur = node2.get(nm)
-                node2[nm] = {"name": name, "mine": mine or (cur["mine"] if cur else False)}
+                node2[nm] = {"name": name,
+                             "mine": mine or (cur["mine"] if cur else False),
+                             "accounts": ",".join(sorted(acc)),
+                             "users": ",".join(sorted(usr))}
         return node2
 
     return _cached("resv", ttl, fn)
@@ -245,6 +415,8 @@ def nodes(ttl: float = 4.0) -> list[dict]:
         data = json.loads(_run(["scontrol", "show", "nodes", "--json"]))
         mine = my_partitions()
         resv = reservations()
+        occ = occupancy()
+        pend = pending_jobs()
         out = []
         for n in data.get("nodes", []):
             total = _parse_gres_gpus(n.get("gres"))
@@ -274,6 +446,8 @@ def nodes(ttl: float = 4.0) -> list[dict]:
             free = tot - us
             # can the user actually obtain these idle GPUs right now?
             grabbable = (not drain and usable_by_me and (not reserved or reserved_for_me))
+            gtypes = sorted(total.keys())
+            queued, queued_count, queued_active = _node_queue(name, gtypes, set(parts), pend)
             out.append({
                 "name": name,
                 "gpu_types": sorted(total.keys()),
@@ -291,9 +465,18 @@ def nodes(ttl: float = 4.0) -> list[dict]:
                 "reserved": reserved,
                 "reserved_for_me": reserved_for_me,
                 "reservation": r["name"] if r else None,
+                "resv_accounts": r.get("accounts") if r else "",
+                "resv_users": r.get("users") if r else "",
+                "occupants": occ.get(name, []),
+                "queued": queued,
+                "queued_count": queued_count,
+                "queued_active": queued_active,
                 "grabbable": grabbable,
                 "cpu_total": _num(n.get("cpus"), 0),
                 "cpu_alloc": _num(n.get("alloc_cpus"), 0),
+                "cpu_load": (_num(n.get("cpu_load"), 0) or 0) / 100,
+                "mem_total_mb": _num(n.get("real_memory"), 0),
+                "mem_alloc_mb": _num(n.get("alloc_memory"), 0),
             })
         out.sort(key=lambda x: (x["gpu_types"][0] if x["gpu_types"] else "", x["name"]))
         return out

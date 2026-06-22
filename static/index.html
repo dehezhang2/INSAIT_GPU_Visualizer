@@ -39,10 +39,13 @@
     <div id="clusterBody" class="cluster-body">loading…</div>
   </section>
 
+  <div id="dragbar" class="dragbar" title="拖动调整宽度(双击复位)"></div>
+
   <aside class="col side">
     <div class="tabs">
       <button class="tab active" data-tab="projects">Projects <span id="projCount" class="pill"></span></button>
       <button class="tab" data-tab="jobs">Jobs <span id="jobsCount" class="pill"></span></button>
+      <button class="tab" data-tab="queue">Queue <span id="queueCount" class="pill"></span></button>
       <button class="tab" data-tab="migrations">Migrations <span id="migCount" class="pill"></span></button>
       <button class="tab" data-tab="drafts">Ad-hoc <span id="draftsCount" class="pill"></span></button>
     </div>
@@ -57,6 +60,16 @@
     </div>
 
     <div id="tab-jobs" class="tab-body hidden"><div id="jobsBody">loading…</div></div>
+
+    <div id="tab-queue" class="tab-body hidden">
+      <div class="addrow">
+        <div id="queueSummary" class="hint" style="flex:1"></div>
+        <label class="chk"><input type="checkbox" id="queueMine"> 只看我的</label>
+        <select id="queueType"><option value="">all GPU</option></select>
+      </div>
+      <p class="hint">全集群 PENDING 队列,按调度优先级排序(挂起/依赖的沉底)。条形=优先级分解:<i class="lg" style="background:#7c5cff"></i>nice <i class="lg" style="background:#4f9cf9"></i>age <i class="lg" style="background:#2ecc71"></i>fair <i class="lg" style="background:#f5a623"></i>qos。</p>
+      <div id="queueBody"></div>
+    </div>
 
     <div id="tab-migrations" class="tab-body hidden">
       <div class="addrow"><div class="hint" style="flex:1">make-before-break:新任务 RUNNING 后才取消旧的。把 Jobs 里的任务拖到左边空闲节点即可发起。</div>
@@ -112,6 +125,24 @@
       <button class="btn ghost" id="modalCancel">Cancel</button>
       <button class="btn" id="modalSave">Save</button>
       <button class="btn primary" id="modalSubmit">Save &amp; Submit</button></div>
+  </div>
+</div>
+
+<!-- node zoom-in modal -->
+<div id="nodeModal" class="modal hidden">
+  <div class="modal-card nodecard">
+    <div class="modal-head">
+      <h3 id="nodeTitle">node</h3>
+      <span id="nodeTags"></span>
+      <span class="muted" id="nodeLive" style="margin-left:auto;font-size:11px"></span>
+      <button class="btn ghost" id="nodeClose">✕</button>
+    </div>
+    <div class="node-detail">
+      <div id="nodeInfo" class="node-info"></div>
+      <div id="nodeGrid" class="node-grid"></div>
+      <div id="nodeOcc" class="node-occ"></div>
+      <div id="nodeQueue" class="node-queue"></div>
+    </div>
   </div>
 </div>
 

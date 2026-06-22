@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import traceback
@@ -24,6 +25,7 @@ import deps
 import drafts
 import logs
 import migrate
+import monitors
 import projects
 import sbatch
 import slurm
@@ -38,8 +40,19 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "gpuviz/0.2"
 
     # -- io helpers -------------------------------------------------------
+    @staticmethod
+    def _sane(o):
+        """Strip inf/nan (e.g. TimeLimit=UNLIMITED) — not valid JSON."""
+        if isinstance(o, float) and not math.isfinite(o):
+            return None
+        if isinstance(o, dict):
+            return {k: Handler._sane(v) for k, v in o.items()}
+        if isinstance(o, (list, tuple)):
+            return [Handler._sane(x) for x in o]
+        return o
+
     def _json(self, obj, status=200):
-        body = json.dumps(obj).encode()
+        body = json.dumps(self._sane(obj)).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -113,6 +126,8 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/api/qos":
             return self._json({"qos": slurm.my_qos()})
+        if path == "/api/queue":
+            return self._queue()
         if path == "/api/projects":
             return self._json({"projects": [projects.status(p) for p in projects.list_projects()]})
         m = re.fullmatch(r"/api/projects/(\d+)/catalog", path)
@@ -126,6 +141,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"migrations": migrate.list_migrations()})
         if path == "/api/transfers":
             return self._json({"transfers": transfer.list_transfers()})
+        if path == "/api/monitors":
+            return self._json({"monitors": monitors.list_monitors()})
         if path == "/api/sbatch/help":
             return self._json({"help": sbatch.FIELD_HELP})
         m = re.fullmatch(r"/api/jobs/([\w\[\]%_-]+)/log", path)
@@ -139,6 +156,38 @@ class Handler(BaseHTTPRequestHandler):
                 "workdir": paths["workdir"],
             })
         return self._json({"error": "not found"}, 404)
+
+    def _queue(self):
+        """Cluster-wide PENDING queue, sorted by scheduling order, for the Queue
+        tab. Projects out the non-serializable required/excluded node sets."""
+        pend = slurm.pending_jobs()
+        rows = []
+        summary = {}
+        for p in pend:
+            reason = p["reason"]
+            waiting = not (reason.startswith("JobHeld") or reason in ("Dependency", "BeginTime"))
+            req = p.get("required")
+            rows.append({
+                "id": p["id"], "job_id": p["job_id"], "user": p["user"],
+                "name": p["name"], "partition": p["partition"], "qos": p["qos"],
+                "priority": p["priority"], "reason": reason, "gpus": p["gpus"],
+                "gpu_type": p["gpu_type"], "submit_time": p["submit_time"],
+                "sprio": p["sprio"], "waiting": waiting,
+                "pinned": req is not None,
+                "nodelist": sorted(req) if req else None,
+                "mine": p["user"] == slurm.USER,
+            })
+            if p["gpus"]:
+                t = p["gpu_type"] or "gpu"
+                s = summary.setdefault(t, {"jobs": 0, "gpus": 0, "waiting": 0})
+                s["jobs"] += 1
+                s["gpus"] += p["gpus"]
+                if waiting:
+                    s["waiting"] += 1
+        rows.sort(key=lambda x: (not x["waiting"], -(x["priority"] or 0)))
+        for i, r in enumerate(rows):
+            r["rank"] = i + 1 if r["waiting"] else None
+        return self._json({"queue": rows, "summary": summary, "me": slurm.USER})
 
     def _project_catalog(self, pid):
         p = projects.get(pid)
@@ -168,6 +217,9 @@ class Handler(BaseHTTPRequestHandler):
             keep = (q.get("keep_snapshot") or ["0"])[0] in ("1", "true")
             ok = submitter.delete_submission(int(m.group(1)), remove_snapshot=not keep)
             return self._json({"ok": ok}, 200 if ok else 404)
+        m = re.fullmatch(r"/api/monitors/([\w.:-]+)", path)
+        if m:
+            return self._json({"ok": monitors.delete(m.group(1))})
         return self._json({"error": "not found"}, 404)
 
     # -- POST / PUT -------------------------------------------------------
@@ -216,6 +268,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/transfers/clear":
             transfer.clear_finished()
             return self._json({"ok": True})
+
+        # ---- external progress monitors ---------------------------------
+        if path == "/api/monitors":
+            try:
+                return self._json({"monitor": monitors.upsert(body)})
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+        if path == "/api/monitors/clear":
+            return self._json({"cleared": monitors.clear_finished()})
 
         # ---- ad-hoc drafts (secondary) ----------------------------------
         if path == "/api/drafts":

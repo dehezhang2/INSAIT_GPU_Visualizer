@@ -14,6 +14,7 @@ function btn(label,cls,fn){ const b=ce("button","btn "+cls); b.textContent=label
 function toast(msg,kind){ const t=ce("div","toast "+(kind||"")); t.textContent=msg; document.body.appendChild(t); setTimeout(()=>t.remove(),3400); }
 function fmtMin(m){ if(m==null) return ""; if(!isFinite(m)) return "∞"; const d=Math.floor(m/1440),h=Math.floor(m%1440/60),mm=m%60; return (d?d+"d":"")+(h?h+"h":"")+(mm?mm+"m":"")||"0m"; }
 function fmtBytes(n){ if(!n) return "0"; const u=["B","K","M","G"]; let i=0; while(n>=1024&&i<3){n/=1024;i++;} return n.toFixed(i?1:0)+u[i]; }
+function fmtAge(s){ if(s==null) return ""; if(s<60) return s+"s 前"; if(s<3600) return Math.floor(s/60)+"m 前"; return Math.floor(s/3600)+"h 前"; }
 
 // ---- state -----------------------------------------------------------------
 let STATE={nodes:[],jobs:[],partitions:[],me:"",site:""};
@@ -57,10 +58,18 @@ function nodeCard(n){
   const top=ce("div","node-top");
   top.innerHTML=`<span class="node-name">${n.name}</span>`+(n.usable_by_me?"":'<span class="lock" title="无可用分区">🔒</span>')+tag;
   c.appendChild(top);
-  const cells=ce("div","cells");
-  for(const pt of n.per_type) for(let i=0;i<pt.total;i++){
-    const free=i>=pt.used, cls=free?(n.grabbable?" free":" idle"):"";
-    const cell=ce("span","cell"+cls); cell.title=`${pt.type} #${i} ${free?(n.grabbable?"free":"idle — 不可用("+(n.drain?"draining":n.reserved?"reserved":"")+")"):"used"}`;
+  // map GPU index -> occupying job (exact IDX from gres_detail when available)
+  const owner={}; let haveIdx=false;
+  for(const o of n.occupants||[]) for(const ix of (o.gpu_idxs||[])){ owner[ix]=o; haveIdx=true; }
+  const cells=ce("div","cells"); let gi=0;
+  for(const pt of n.per_type) for(let i=0;i<pt.total;i++,gi++){
+    const o=owner[gi];
+    const used=haveIdx?(o!==undefined):(i<pt.used);
+    const cls=used?"":(n.grabbable?" free":" idle");
+    const cell=ce("span","cell"+cls);
+    cell.title=used
+      ?`${pt.type} #${gi} — ${o?`${o.user} · ${o.job_id} ${o.name}`:"used"}`
+      :`${pt.type} #${gi} ${n.grabbable?"free":"idle — 不可用("+(n.drain?"draining":n.reserved?"reserved":"")+")"}`;
     cells.appendChild(cell);
   }
   c.appendChild(cells);
@@ -73,8 +82,154 @@ function nodeCard(n){
   c.addEventListener("drop",e=>{ e.preventDefault(); c.classList.remove("drop");
     if(stale && !confirm(`${n.name} 的空卡当前不可抢(${n.drain?"draining":"reserved"}),仍要投过去?`)) return;
     onDropNode(n); });
+  c.addEventListener("mouseenter",()=>{ if(!window.__drag) showNodeTip(c,n); });
+  c.addEventListener("mouseleave",hideNodeTip);
+  c.addEventListener("click",()=>{ hideNodeTip(); openNode(n.name); });
+  c.style.cursor="zoom-in";
   return c;
 }
+
+// ===========================================================================
+// NODE ZOOM-IN
+// ===========================================================================
+let NODE_OPEN=null;   // node name while the detail modal is open
+const jobColor=id=>`hsl(${(id*137.508)%360} 55% 30%)`;
+const jobColorB=id=>`hsl(${(id*137.508)%360} 65% 52%)`;
+function fmtDur(sec){ if(sec==null||sec<0) return ""; const d=Math.floor(sec/86400),h=Math.floor(sec%86400/3600),m=Math.floor(sec%3600/60);
+  return d?`${d}d${h}h`:h?`${h}h${m}m`:`${m}m`; }
+
+function openNode(name){ NODE_OPEN=name; renderNodeModal(); $("#nodeModal").classList.remove("hidden"); }
+function closeNode(){ NODE_OPEN=null; $("#nodeModal").classList.add("hidden"); }
+
+function renderNodeModal(){
+  if(!NODE_OPEN) return;
+  const n=STATE.nodes.find(x=>x.name===NODE_OPEN);
+  if(!n){ closeNode(); return; }
+  $("#nodeTitle").textContent=n.name;
+  $("#nodeLive").textContent="live · "+new Date().toLocaleTimeString();
+  // tags
+  let tags="";
+  if(n.drain) tags+=`<span class="ntag drain">draining</span>`;
+  if(n.reserved) tags+=`<span class="ntag ${n.reserved_for_me?"resvme":"resv"}" title="${esc(n.resv_accounts||n.resv_users||"")}">${n.reserved_for_me?"resv✓":"reserved 🔒"} ${esc(n.reservation||"")}</span>`;
+  if(n.planned) tags+=`<span class="ntag planned">planned</span>`;
+  if(!n.usable_by_me) tags+=`<span class="ntag">no partition 🔒</span>`;
+  $("#nodeTags").innerHTML=tags;
+  // info: state / partitions / cpu / mem
+  const cpuPct=n.cpu_total?Math.round(100*n.cpu_alloc/n.cpu_total):0;
+  const memPct=n.mem_total_mb?Math.round(100*n.mem_alloc_mb/n.mem_total_mb):0;
+  $("#nodeInfo").innerHTML=
+    `<div class="ninfo-row"><span class="muted">state</span> ${esc((n.state||[]).join("+").toLowerCase())}
+       <span class="muted" style="margin-left:14px">partitions</span> ${esc((n.partitions||[]).join(", "))}</div>`+
+    `<div class="ninfo-row nbar"><span class="muted">CPU</span><div class="pbar"><div class="pfill" style="width:${cpuPct}%"></div></div>
+       <span>${n.cpu_alloc}/${n.cpu_total} (${cpuPct}%) · load ${Math.round(n.cpu_load||0)}</span></div>`+
+    `<div class="ninfo-row nbar"><span class="muted">MEM</span><div class="pbar"><div class="pfill" style="width:${memPct}%"></div></div>
+       <span>${Math.round((n.mem_alloc_mb||0)/1024)}/${Math.round((n.mem_total_mb||0)/1024)}G (${memPct}%)</span></div>`;
+  // big gpu grid colored per job
+  const owner={}; let haveIdx=false;
+  for(const o of n.occupants||[]) for(const ix of (o.gpu_idxs||[])){ owner[ix]=o; haveIdx=true; }
+  const grid=$("#nodeGrid"); grid.innerHTML=""; let gi=0;
+  for(const pt of n.per_type) for(let i=0;i<pt.total;i++,gi++){
+    const o=owner[gi];
+    const used=haveIdx?(o!==undefined):(i<pt.used);
+    const cell=ce("div","bigcell"+(used?"":(n.grabbable?" bfree":" bidle")));
+    if(used&&o){ cell.style.background=jobColor(o.job_id); cell.style.borderColor=jobColorB(o.job_id); }
+    cell.innerHTML=`<div class="bidx">${esc(pt.type)} #${gi}</div>`+
+      (used?`<div class="buser">${esc(o?o.user:"used")}</div><div class="bjob">${o?`${o.job_id}`:""}</div>`
+           :`<div class="buser ${n.grabbable?"freetxt":"idletxt"}">${n.grabbable?"free":"idle"}</div><div class="bjob">${n.grabbable?"可抢":(n.drain?"draining":n.reserved?"reserved":"")}</div>`);
+    if(used&&o) cell.title=`${o.user} · ${o.job_id} ${o.name}`;
+    grid.appendChild(cell);
+  }
+  // occupants table
+  const occ=n.occupants||[];
+  const me=STATE.me;
+  const nowSec=Date.now()/1000;
+  let html="";
+  if(occ.length){
+    html=`<div class="nocc-head">运行中任务 (${occ.length})</div>`;
+    for(const o of occ){
+      const run=o.start_time?fmtDur(nowSec-o.start_time):"";
+      const lim=o.time_limit_min?fmtMin(o.time_limit_min):"";
+      html+=`<div class="nocc-row">
+        <span class="sw" style="background:${jobColorB(o.job_id)}"></span>
+        <b class="tuser">${esc(o.user)}</b>
+        <span class="jid">${o.job_id}</span>
+        <span class="oname" title="${esc(o.name)}">${esc(o.name)}</span>
+        <span class="og">${o.gpus?`${o.gpus}×gpu${o.gpu_idxs&&o.gpu_idxs.length?` [${o.gpu_idxs.join(",")}]`:""}`:"cpu"}${o.cpus?` · ${o.cpus}c`:""}</span>
+        <span class="muted">${run?`跑了 ${run}`:""}${lim?` / ${lim}`:""}</span>
+        <span class="oact" data-job="${o.job_id}" data-name="${esc(o.name)}">${o.user===me?`<button class="btn sm ghost olog">logs</button><button class="btn sm ghost danger ocxl">cancel</button>`:""}</span>
+      </div>`;
+    }
+  } else html=`<div class="empty">没有运行中任务</div>`;
+  const box=$("#nodeOcc"); box.innerHTML=html;
+  box.querySelectorAll(".olog").forEach(b=>b.onclick=e=>{ const a=e.target.closest(".oact");
+    openLog({job_id:+a.dataset.job,id:a.dataset.job,name:a.dataset.name}); });
+  box.querySelectorAll(".ocxl").forEach(b=>b.onclick=e=>{ const a=e.target.closest(".oact");
+    if(confirm(`scancel ${a.dataset.job}?`)) jobAction(+a.dataset.job,"cancel"); });
+  // ---- queue: pending jobs in line for this node (with sprio breakdown) ----
+  const q=n.queued||[], qbox=$("#nodeQueue");
+  if(!q.length){ qbox.innerHTML=`<div class="nocc-head">排队中 (0)</div><div class="empty">没有排队任务</div>`; }
+  else{
+    const held=(n.queued_count||q.length)-(n.queued_active??q.length);
+    const maxT=Math.max(1,...q.map(p=>(p.sprio&&p.sprio.total)||p.priority||0));
+    qbox.innerHTML=`<div class="nocc-head">排队中 · 竞争本节点资源 (${n.queued_count}${held>0?` · ${n.queued_active} 活跃 / ${held} 挂起·依赖`:""})${n.queued_count>q.length?` · 前 ${q.length}`:""}
+        <span class="prio-legend"><i style="background:#7c5cff"></i>nice <i style="background:#4f9cf9"></i>age <i style="background:#2ecc71"></i>fair <i style="background:#f5a623"></i>qos</span></div>`+
+      q.map((p,i)=>`<div class="nq-item${p.waiting?"":" dim"}">
+        <div class="nq-row">
+          <span class="qrank">${p.waiting?"#"+(i+1):"·"}</span>
+          ${p.pinned?`<span class="qpin" title="--nodelist 指定本节点">📌</span>`:""}
+          <b class="tuser">${esc(p.user)}</b>
+          <span class="jid">${esc(p.id)}</span>
+          <span class="oname" title="${esc(p.name)}">${esc(p.name)}</span>
+          <span class="og">${p.gpus}×${esc(p.gpu_type||"gpu")}</span>
+          <span class="muted">${esc(p.reason||"")}${p.qos?` · ${esc(p.qos)}`:""}</span>
+        </div>
+        ${prioBar(p.sprio,p.priority,maxT)}
+      </div>`).join("");
+  }
+}
+// stacked priority bar from sprio breakdown; length ∝ total vs queue leader
+function prioBar(spr,fallback,maxT){
+  const total=(spr&&spr.total)||fallback||0;
+  if(!total) return "";
+  const segs=[["nice",spr?spr.nice_boost:0,"#7c5cff"],["age",spr?spr.age:0,"#4f9cf9"],
+              ["fair",spr?spr.fairshare:0,"#2ecc71"],["qos",spr?spr.qos:0,"#f5a623"],
+              ["part",spr?spr.partition:0,"#5a6573"]].filter(s=>s[1]>0);
+  const sum=segs.reduce((s,x)=>s+x[1],0)||total;
+  const wpct=Math.max(3,Math.round(100*total/maxT));
+  const inner=segs.map(([k,v,c])=>`<span class="ps" style="width:${Math.round(100*v/sum)}%;background:${c}"></span>`).join("");
+  const fmt=x=>x.toLocaleString();
+  const tip=`总 ${fmt(total)}`+(spr?` = ${spr.nice_boost?`nice +${fmt(spr.nice_boost)} · `:""}age ${fmt(spr.age)} · fair ${fmt(spr.fairshare)} · qos ${fmt(spr.qos)}${spr.partition?` · part ${fmt(spr.partition)}`:""}`:"");
+  return `<div class="prio-wrap" title="${tip}"><div class="pbar2" style="width:${wpct}%">${inner}</div><span class="ptot">${fmt(total)}</span></div>`;
+}
+
+function showNodeTip(card,n){
+  const tip=$("#tip");
+  let html=`<div class="flag">${esc(n.name)} · ${esc((n.state||[]).join("+").toLowerCase())}</div>`;
+  if(n.reserved){
+    const who=[n.resv_accounts&&`accounts: ${n.resv_accounts}`,n.resv_users&&`users: ${n.resv_users}`].filter(Boolean).join(" · ");
+    html+=`<div class="trow resv">🔒 reservation <b>${esc(n.reservation||"")}</b>${n.reserved_for_me?" (含你)":""}${who?`<div class="tsub">${esc(who)}</div>`:""}</div>`;
+  }
+  const occ=n.occupants||[];
+  if(occ.length){
+    const rows=occ.slice(0,10).map(o=>
+      `<div class="trow"><b class="tuser">${esc(o.user)}</b> · ${o.job_id} ${esc(o.name)}`+
+      `<span class="tg">${o.gpus?` ${o.gpus}×gpu${o.gpu_idxs&&o.gpu_idxs.length?` [${o.gpu_idxs.join(",")}]`:""}`:" (cpu)"}</span></div>`).join("");
+    html+=rows+(occ.length>10?`<div class="tsub">… +${occ.length-10} more</div>`:"");
+  } else if(!n.reserved) html+=`<div class="tsub">无运行中任务</div>`;
+  if(n.queued_count){
+    const top=(n.queued||[]).filter(q=>q.waiting).slice(0,3)
+      .map(q=>`${esc(q.user)} (${q.gpus}×${esc(q.gpu_type||"gpu")}${q.pinned?" 📌":""})`).join(", ");
+    html+=`<div class="trow qrow">⏳ 排队 ${n.queued_active||0} 活跃${n.queued_count>(n.queued_active||0)?` / ${n.queued_count} 总`:""}${top?`<div class="tsub">${top}${(n.queued_active||0)>3?" …":""}</div>`:""}</div>`;
+  }
+  html+=`<div class="tsub">点击查看节点详情 →</div>`;
+  tip.innerHTML=html;
+  tip.style.maxWidth="380px";
+  tip.classList.remove("hidden");
+  const r=card.getBoundingClientRect(), tw=Math.min(380,tip.offsetWidth||320);
+  tip.style.left=Math.max(8,Math.min(r.left,window.innerWidth-tw-12))+"px";
+  tip.style.top=(r.bottom+6+(tip.offsetHeight||0)>window.innerHeight?r.top-tip.offsetHeight-6:r.bottom+6)+"px";
+}
+function hideNodeTip(){ const tip=$("#tip"); tip.classList.add("hidden"); tip.style.maxWidth=""; }
 async function onDropNode(node){
   const d=window.__drag; if(!d) return;
   if(d.type==="job"){
@@ -273,20 +428,22 @@ function popMenu(anchor,items,onPick){
 // ===========================================================================
 // MIGRATIONS
 // ===========================================================================
-let TRANSFERS=[];
+let TRANSFERS=[], MONITORS=[];
 async function loadMigrations(){
-  const [mr,tr]=await Promise.all([api.get("/api/migrations"),api.get("/api/transfers")]);
-  MIGRATIONS=mr.migrations; TRANSFERS=tr.transfers;
+  const [mr,tr,mo]=await Promise.all([api.get("/api/migrations"),api.get("/api/transfers"),api.get("/api/monitors")]);
+  MIGRATIONS=mr.migrations; TRANSFERS=tr.transfers; MONITORS=mo.monitors;
   const act=MIGRATIONS.filter(m=>["submitting","waiting","swapping"].includes(m.state)).length
-    +TRANSFERS.filter(t=>t.state==="running").length;
+    +TRANSFERS.filter(t=>t.state==="running").length
+    +MONITORS.filter(m=>m.status==="running").length;
   $("#migCount").textContent=act||"";
   renderActivity(); renderMigBar();
 }
 function renderMigBar(){
   const am=MIGRATIONS.filter(m=>["submitting","waiting","swapping"].includes(m.state));
   const at=TRANSFERS.filter(t=>t.state==="running");
+  const ao=MONITORS.filter(m=>m.status==="running");
   const bar=$("#migBar");
-  if(!am.length&&!at.length){ bar.classList.add("hidden"); bar.innerHTML=""; return; }
+  if(!am.length&&!at.length&&!ao.length){ bar.classList.add("hidden"); bar.innerHTML=""; return; }
   bar.classList.remove("hidden"); bar.innerHTML="";
   for(const m of am){ const p=ce("div","migpill "+m.state);
     p.innerHTML=`<span class="dot"></span><span>${esc(m.label||("→"+m.target_node))}</span><span class="muted">${m.state}${m.new_job_id?" · job "+m.new_job_id:""}</span>`;
@@ -294,16 +451,41 @@ function renderMigBar(){
   for(const t of at){ const p=ce("div","migpill swapping");
     p.innerHTML=`<span class="dot"></span><span>⇄ ${esc(t.dst.split("/").pop())}</span><span class="muted">${t.percent}% ${esc(t.rate||"")}</span>`;
     p.appendChild(btn("abort","ghost sm",()=>abortTransfer(t.id))); bar.appendChild(p); }
+  for(const m of ao){ const p=ce("div","migpill "+(m.stale?"failed":"swapping"));
+    p.innerHTML=`<span class="dot"></span><span>📡 ${esc(m.label||m.key)}</span><span class="muted">${m.percent!=null?m.percent+"%":""}${m.stale?" stale":""}</span>`;
+    bar.appendChild(p); }
 }
 function renderActivity(){
   const body=$("#migrationsBody"); body.innerHTML="";
-  if(!MIGRATIONS.length&&!TRANSFERS.length){ body.innerHTML='<div class="empty">没有迁移 / 传输</div>'; return; }
+  if(!MIGRATIONS.length&&!TRANSFERS.length&&!MONITORS.length){ body.innerHTML='<div class="empty">没有迁移 / 传输 / 外部监控</div>'; return; }
+  for(const m of MONITORS){
+    const c=ce("div","card monitor"+(m.stale?" stale":""));
+    const st=m.stale?"stale":m.status;
+    const cls=m.status==="done"?"RUNNING":m.status==="failed"||m.stale?"OTHER":"PENDING";
+    const top=ce("div","card-top");
+    top.innerHTML=`<span class="state ${cls}">📡 ${esc(st)}</span><span class="jname" title="${esc(m.key)}">${esc(m.label||m.key)}</span>`+
+      (m.repo?`<span class="origin">${esc(m.repo)}</span>`:"");
+    c.appendChild(top);
+    if(m.percent!=null){ const bar=ce("div","pbar"); const fill=ce("div","pfill"); fill.style.width=m.percent+"%"; bar.appendChild(fill); c.appendChild(bar); }
+    const meta=ce("div","card-meta");
+    meta.innerHTML=`<span>${m.percent!=null?m.percent+"%":esc(m.kind||"custom")}</span>`+
+      (m.job_id?`<span>job ${esc(String(m.job_id))}</span>`:"")+(m.node?`<span>@${esc(m.node)}</span>`:"")+
+      `<span class="muted">${m.age_s!=null?fmtAge(m.age_s):""}${m.stale?" · 无更新":""}</span>`;
+    c.appendChild(meta);
+    if(m.message){ const l=ce("div","deplist"); l.textContent=m.message; c.appendChild(l); }
+    const a=ce("div","card-actions"); a.appendChild(btn("dismiss","sm ghost",async()=>{ await api.del(`/api/monitors/${encodeURIComponent(m.key)}`); loadMigrations(); })); c.appendChild(a);
+    body.appendChild(c);
+  }
+  if(!MIGRATIONS.length&&!TRANSFERS.length) return;
   for(const m of MIGRATIONS){
     const c=ce("div","card");
     const top=ce("div","card-top");
     top.innerHTML=`<span class="state ${m.state==="done"?"RUNNING":m.state==="waiting"?"PENDING":"OTHER"}">${m.state}</span><span class="jname">${esc(m.label||"")}</span>`;
     c.appendChild(top);
-    const meta=ce("div","card-meta"); meta.innerHTML=`<span>src ${m.src_job_id}</span>${m.new_job_id?`<span>new ${m.new_job_id}</span>`:""}<span>→ ${m.target_node}</span>`;
+    const waitS=m.created_at?Math.max(0,Math.floor(Date.now()/1000-m.created_at)):null;
+    const toS=m.timeout_s||0;
+    const meta=ce("div","card-meta"); meta.innerHTML=`<span>src ${m.src_job_id}</span>${m.new_job_id?`<span>new ${m.new_job_id}</span>`:""}<span>→ ${m.target_node}</span>`+
+      (m.state==="waiting"&&waitS!=null?`<span class="muted">等待 ${fmtDur(waitS)}${toS?` / 上限 ${fmtDur(toS)}`:""}</span>`:"");
     c.appendChild(meta);
     const log=ce("div","deplist"); log.textContent=m.log&&m.log.length?m.log[m.log.length-1].msg:""; c.appendChild(log);
     if(["submitting","waiting","swapping"].includes(m.state)){ const a=ce("div","card-actions"); a.appendChild(btn("abort","sm ghost danger",()=>abortMig(m.id))); c.appendChild(a); }
@@ -423,12 +605,52 @@ function setupTips(){
 }
 
 // ===========================================================================
+// QUEUE (cluster-wide pending jobs, by priority)
+// ===========================================================================
+let QUEUE=[], QSUMMARY={};
+let QFILT={mine:false,type:""};
+async function loadQueue(){
+  try{ const r=await api.get("/api/queue"); QUEUE=r.queue; QSUMMARY=r.summary; }
+  catch(e){ $("#queueBody").innerHTML=`<div class="empty">读取队列失败: ${esc(e.message)}</div>`; return; }
+  renderQueue();
+}
+function renderQueue(){
+  let rows=QUEUE.slice();
+  if(QFILT.mine) rows=rows.filter(p=>p.mine);
+  if(QFILT.type) rows=rows.filter(p=>(p.gpu_type||"")===QFILT.type);
+  // header summary by gpu type (independent of row filter)
+  const sm=Object.entries(QSUMMARY).sort().map(([t,s])=>
+    `<b>${s.waiting}</b>${s.jobs>s.waiting?`<span class="muted">+${s.jobs-s.waiting}</span>`:""} 个等 <b>${t}</b>(${s.gpus} 卡)`).join(" · ");
+  const mineN=QUEUE.filter(p=>p.mine).length;
+  $("#queueSummary").innerHTML=(sm||"无 GPU 排队任务")+(mineN?` · 我的 ${mineN}`:"");
+  $("#queueCount").textContent=QUEUE.filter(p=>p.waiting).length||"";
+  const body=$("#queueBody");
+  if(!rows.length){ body.innerHTML='<div class="empty">没有匹配的排队任务</div>'; return; }
+  const maxT=Math.max(1,...rows.map(p=>(p.sprio&&p.sprio.total)||p.priority||0));
+  body.innerHTML=rows.map(p=>`<div class="qitem${p.waiting?"":" dim"}${p.mine?" me":""}">
+    <div class="nq-row">
+      <span class="qrank">${p.waiting?"#"+p.rank:"·"}</span>
+      ${p.pinned?`<span class="qpin" title="--nodelist ${esc((p.nodelist||[]).join(","))}">📌</span>`:""}
+      <b class="tuser">${esc(p.user)}</b>
+      <span class="jid">${esc(p.id)}</span>
+      <span class="oname" title="${esc(p.name)}">${esc(p.name)}</span>
+      <span class="og">${p.gpus?`${p.gpus}×${esc(p.gpu_type||"gpu")}`:"cpu"}</span>
+      <span class="muted">${esc(p.partition||"")}${p.qos?` · ${esc(p.qos)}`:""}</span>
+      <span class="qreason muted" title="${esc(p.reason||"")}">${esc(p.reason||"")}</span>
+    </div>
+    ${prioBar(p.sprio,p.priority,maxT)}
+  </div>`).join("");
+}
+
+// ===========================================================================
 // POLLING / WIRING
 // ===========================================================================
 async function refresh(){
   try{ STATE=await api.get("/api/state"); $("#banner").classList.add("hidden");
-    renderCluster(); renderJobs(); renderHeader(); $("#updated").textContent=new Date().toLocaleTimeString();
+    renderCluster(); renderJobs(); renderHeader(); renderNodeModal();
+    $("#updated").textContent=new Date().toLocaleTimeString();
     await loadMigrations();
+    if(!$("#tab-queue").classList.contains("hidden")) loadQueue();
   }catch(e){ const b=$("#banner"); b.textContent="无法读取 Slurm: "+e.message; b.classList.remove("hidden"); }
 }
 function renderHeader(){
@@ -445,7 +667,8 @@ let pollTimer=null;
 function startPolling(){ stopPolling(); const ms=+$("#refreshSel").value; if(ms>0) pollTimer=setInterval(refresh,ms); }
 function stopPolling(){ if(pollTimer) clearInterval(pollTimer); pollTimer=null; }
 function switchTab(name){ document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===name));
-  for(const n of ["projects","jobs","migrations","drafts"]) $("#tab-"+n).classList.toggle("hidden",n!==name); }
+  for(const n of ["projects","jobs","queue","migrations","drafts"]) $("#tab-"+n).classList.toggle("hidden",n!==name);
+  if(name==="queue") loadQueue(); }
 
 function wire(){
   $("#refreshBtn").onclick=refresh;
@@ -453,10 +676,12 @@ function wire(){
   $("#onlyFree").onchange=e=>{FILTERS.onlyFree=e.target.checked;renderCluster();};
   $("#onlyMine").onchange=e=>{FILTERS.onlyMine=e.target.checked;renderCluster();};
   $("#typeFilter").onchange=e=>{FILTERS.type=e.target.value;renderCluster();};
+  $("#queueMine").onchange=e=>{QFILT.mine=e.target.checked;renderQueue();};
+  $("#queueType").onchange=e=>{QFILT.type=e.target.value;renderQueue();};
   document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>switchTab(t.dataset.tab));
   $("#addProjBtn").onclick=async()=>{ const p=$("#projPath").value.trim(); if(!p) return; try{ await api.post("/api/projects",{path:p}); $("#projPath").value=""; loadProjects(); }catch(e){ toast(e.message,"bad"); } };
   $("#projPath").addEventListener("keydown",e=>{ if(e.key==="Enter") $("#addProjBtn").click(); });
-  $("#clearMigBtn").onclick=async()=>{ await Promise.all([api.post("/api/migrations/clear",{}),api.post("/api/transfers/clear",{})]); loadMigrations(); };
+  $("#clearMigBtn").onclick=async()=>{ await Promise.all([api.post("/api/migrations/clear",{}),api.post("/api/transfers/clear",{}),api.post("/api/monitors/clear",{})]); loadMigrations(); };
   // submit modal
   $("#subClose").onclick=$("#subCancel").onclick=()=>$("#subModal").classList.add("hidden");
   $("#subSubmit").onclick=doSubmit; $("#maxSchedBtn").onclick=maxSched;
@@ -466,19 +691,40 @@ function wire(){
   $("#newHolderBtn").onclick=async()=>{ const d=(await api.post("/api/drafts",{kind:"holder"})).draft; await loadDrafts(); openEditor(d); };
   $("#modalClose").onclick=$("#modalCancel").onclick=()=>$("#modal").classList.add("hidden");
   $("#modalSave").onclick=()=>saveEditor(false); $("#modalSubmit").onclick=()=>saveEditor(true);
+  // node zoom-in modal
+  $("#nodeClose").onclick=closeNode;
+  $("#nodeModal").addEventListener("click",e=>{ if(e.target.id==="nodeModal") closeNode(); });
   // log modal
   $("#logClose").onclick=closeLog;
   document.querySelectorAll(".ltab").forEach(t=>t.onclick=()=>{ LOG.stream=t.dataset.stream; document.querySelectorAll(".ltab").forEach(x=>x.classList.toggle("active",x===t)); renderLog(); });
   $("#logModal").addEventListener("click",e=>{ if(e.target.id==="logModal") closeLog(); });
 }
 
+function setupSplitter(){
+  const bar=$("#dragbar"); if(!bar) return;
+  const root=document.documentElement;
+  const apply=w=>root.style.setProperty("--side-w",Math.round(w)+"px");
+  const clamp=w=>Math.max(280,Math.min(window.innerWidth-360,w));
+  if(localStorage.gpuvizSideW) apply(clamp(+localStorage.gpuvizSideW));
+  let dragging=false;
+  bar.addEventListener("mousedown",e=>{ dragging=true; bar.classList.add("dragging");
+    document.body.style.userSelect="none"; document.body.style.cursor="col-resize"; e.preventDefault(); });
+  window.addEventListener("mousemove",e=>{ if(dragging) apply(clamp(window.innerWidth-e.clientX)); });
+  window.addEventListener("mouseup",()=>{ if(!dragging) return; dragging=false; bar.classList.remove("dragging");
+    document.body.style.userSelect=""; document.body.style.cursor="";
+    localStorage.gpuvizSideW=getComputedStyle(root).getPropertyValue("--side-w").trim().replace("px",""); });
+  bar.addEventListener("dblclick",()=>{ apply(380); localStorage.gpuvizSideW=380; });
+}
+
 async function init(){
-  wire(); setupTips();
+  wire(); setupTips(); setupSplitter();
   if(localStorage.gpuvizRefresh) $("#refreshSel").value=localStorage.gpuvizRefresh;
   try{ HELP=(await api.get("/api/sbatch/help")).help; }catch(_){}
   try{ QOS=(await api.get("/api/qos")).qos; }catch(_){}
   await refresh();
-  $("#typeFilter").innerHTML='<option value="">all types</option>'+[...new Set(STATE.nodes.flatMap(n=>n.gpu_types))].sort().map(t=>`<option>${t}</option>`).join("");
+  const allTypes=[...new Set(STATE.nodes.flatMap(n=>n.gpu_types))].sort();
+  $("#typeFilter").innerHTML='<option value="">all types</option>'+allTypes.map(t=>`<option>${t}</option>`).join("");
+  $("#queueType").innerHTML='<option value="">all GPU</option>'+allTypes.map(t=>`<option>${t}</option>`).join("");
   await loadProjects(); await loadDrafts();
   startPolling();
 }
