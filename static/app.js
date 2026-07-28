@@ -17,9 +17,16 @@ function fmtBytes(n){ if(!n) return "0"; const u=["B","K","M","G"]; let i=0; whi
 function fmtAge(s){ if(s==null) return ""; if(s<60) return s+"s 前"; if(s<3600) return Math.floor(s/60)+"m 前"; return Math.floor(s/3600)+"h 前"; }
 
 // ---- state -----------------------------------------------------------------
-let STATE={nodes:[],jobs:[],partitions:[],me:"",site:""};
+let STATE={nodes:[],jobs:[],finished:[],partitions:[],me:"",site:""};
 let PROJECTS=[], CATALOGS={}, QOS=[], MIGRATIONS=[], DRAFTS=[], HELP={};
 let FILTERS={onlyFree:false,onlyMine:false,type:""};
+// finished jobs: shown in their own tab, auto-dropped 3 min after they end
+const FIN_TTL_MS=180000;
+const TERMINAL=new Set(["COMPLETED","FAILED","CANCELLED","TIMEOUT","OUT_OF_MEMORY",
+  "NODE_FAIL","PREEMPTED","BOOT_FAIL","DEADLINE","REVOKED","SPECIAL_EXIT","ENDED"]);
+let FINISHED=new Map();      // job id -> entry currently shown in the Finished tab
+let FIN_GONE=new Set();      // ids already expired/dismissed — never resurrect them
+let LAST_JOBS=new Map();     // previous poll's live jobs, to catch ones that vanish
 window.__drag=null;
 
 // ===========================================================================
@@ -361,10 +368,11 @@ async function doSubmit(){
 // ===========================================================================
 // JOBS (management)
 // ===========================================================================
+function liveJobs(){ return STATE.jobs.filter(j=>!TERMINAL.has(j.state)&&!FINISHED.has(String(j.id))); }
 function renderJobs(){
-  const body=$("#jobsBody"); $("#jobsCount").textContent=STATE.jobs.length;
-  if(!STATE.jobs.length){ body.innerHTML='<div class="empty">没有运行/排队任务</div>'; return; }
-  body.innerHTML=""; for(const j of STATE.jobs) body.appendChild(jobCard(j));
+  const body=$("#jobsBody"); const list=liveJobs(); $("#jobsCount").textContent=list.length;
+  if(!list.length){ body.innerHTML='<div class="empty">没有运行/排队任务</div>'; return; }
+  body.innerHTML=""; for(const j of list) body.appendChild(jobCard(j));
 }
 function jobCard(j){
   const c=ce("div","card");
@@ -403,6 +411,7 @@ function editPending(j){
 }
 // handoff: replace a running job with a catalog job on the same node (make-before-break)
 function openSwap(anchor,j){
+  if(FINISHED.has(String(j.id))||TERMINAL.has(j.state)){ toast(`${j.id} 已结束,无法 swap`,"bad"); return; }
   const items=[];
   for(const p of PROJECTS){ const c=CATALOGS[p.id]; if(c&&c.jobs) for(const s of c.jobs) items.push({label:`${p.name} · ${s.key}`,pid:p.id,key:s.key}); }
   if(!items.length){ toast("没有可用的 catalog 任务做接管","bad"); return; }
@@ -423,6 +432,80 @@ function popMenu(anchor,items,onPick){
   document.body.appendChild(m);
   const r=anchor.getBoundingClientRect(); m.style.left=Math.min(r.left,window.innerWidth-330)+"px"; m.style.top=(r.bottom+5)+"px"; m.classList.remove("hidden");
   setTimeout(()=>document.addEventListener("click",function h(){ m.remove(); document.removeEventListener("click",h); },{once:true}),0);
+}
+
+// ===========================================================================
+// FINISHED (terminal jobs, auto-expiring)
+// ===========================================================================
+// Two sources: sacct via /api/state (authoritative final state + exit code),
+// and jobs that silently vanish from squeue before accounting catches up.
+function finAdd(key,rec){
+  key=String(key);
+  if(FIN_GONE.has(key)) return;
+  const now=Date.now(), prev=FINISHED.get(key)||{};
+  // clamp: a browser clock ahead of the controller must not expire cards instantly
+  const endedAt=Math.min(rec.end_time?rec.end_time*1000:(prev.endedAt||now),now);
+  FINISHED.set(key,{...prev,...rec,key,endedAt,firstSeen:prev.firstSeen||now});
+}
+const finExpiry=f=>Math.max(f.endedAt+FIN_TTL_MS,f.firstSeen+15000);
+function ingestFinished(){
+  for(const r of STATE.finished||[]) finAdd(r.id,r);
+  const live=new Set(STATE.jobs.map(j=>String(j.id)));
+  for(const j of STATE.jobs) if(TERMINAL.has(j.state)) finAdd(j.id,{...j,state_detail:j.state});
+  for(const [k,j] of LAST_JOBS){          // gone from squeue and not in sacct yet
+    if(live.has(k)||FINISHED.has(k)||FIN_GONE.has(k)) continue;
+    finAdd(k,{...j,state:"ENDED",state_detail:"ENDED · 已离开 squeue",
+      elapsed_s:j.start_time?Math.floor(Date.now()/1000-j.start_time):null});
+  }
+  LAST_JOBS=new Map(STATE.jobs.filter(j=>!TERMINAL.has(j.state)).map(j=>[String(j.id),j]));
+}
+function pruneFinished(){
+  const now=Date.now(); let changed=false;
+  for(const [k,f] of FINISHED) if(now>=finExpiry(f)){ FINISHED.delete(k); FIN_GONE.add(k); changed=true; }
+  return changed;
+}
+function finLeft(f){ return Math.max(0,Math.ceil((finExpiry(f)-Date.now())/1000))+"s 后清除"; }
+function finCls(s){ return s==="COMPLETED"?"DONE":(s==="CANCELLED"||s==="ENDED")?"OTHER":"FAIL"; }
+function renderFinished(){
+  pruneFinished();
+  const rows=[...FINISHED.values()].sort((a,b)=>b.endedAt-a.endedAt);
+  $("#finCount").textContent=rows.length||"";
+  const body=$("#finishedBody");
+  if(!rows.length){ body.innerHTML='<div class="empty">最近 3 分钟没有结束的任务</div>'; return; }
+  body.innerHTML=""; for(const f of rows) body.appendChild(finishedCard(f));
+}
+function finishedCard(f){
+  const cls=finCls(f.state);
+  const c=ce("div","card finished "+cls.toLowerCase());
+  c.dataset.fin=f.key;
+  const top=ce("div","card-top");
+  top.innerHTML=`<span class="jid">${esc(f.id)}</span><span class="jname" title="${esc(f.name)}">${esc(f.name)}</span>`+
+    (f.origin?`<span class="origin" title="from ${esc(f.origin.project)}">${esc(f.origin.job_key)}</span>`:"")+
+    `<span class="state ${cls}" title="${esc(f.state_detail||f.state)}">${esc(f.state)}</span>`;
+  c.appendChild(top);
+  const meta=ce("div","card-meta");
+  meta.innerHTML=(f.gpus?`<span class="gchip">${f.gpus}×${esc(f.gpu_type||"gpu")}</span>`:"")+
+    `<span>${esc(f.partition||"")}${f.elapsed_s!=null?" · 跑了 "+fmtDur(f.elapsed_s):""}</span>`+
+    (f.nodes?`<span>@ ${esc(f.nodes)}</span>`:"")+
+    (f.exit_code?`<span class="reason">exit ${f.exit_code}${f.signal?":"+f.signal:""}</span>`:"")+
+    `<span class="muted fincd">${finLeft(f)}</span>`;
+  c.appendChild(meta);
+  const act=ce("div","card-actions");
+  act.appendChild(btn("logs","sm ghost",()=>openLog({job_id:f.job_id,id:f.id,name:f.name})));
+  const sw=btn("swap→","sm ghost off",()=>{});
+  sw.disabled=true; sw.title="任务已结束,无法再 swap / 接管";
+  act.appendChild(sw);
+  act.appendChild(btn("dismiss","sm ghost",()=>{ FIN_GONE.add(f.key); FINISHED.delete(f.key); renderFinished(); renderJobs(); }));
+  c.appendChild(act);
+  return c;
+}
+function tickFinished(){
+  if(pruneFinished()){ renderFinished(); return; }
+  if($("#tab-finished").classList.contains("hidden")) return;
+  for(const el of document.querySelectorAll("#finishedBody .card[data-fin]")){
+    const f=FINISHED.get(el.dataset.fin), s=el.querySelector(".fincd");
+    if(f&&s) s.textContent=finLeft(f);
+  }
 }
 
 // ===========================================================================
@@ -647,7 +730,8 @@ function renderQueue(){
 // ===========================================================================
 async function refresh(){
   try{ STATE=await api.get("/api/state"); $("#banner").classList.add("hidden");
-    renderCluster(); renderJobs(); renderHeader(); renderNodeModal();
+    ingestFinished();
+    renderCluster(); renderJobs(); renderFinished(); renderHeader(); renderNodeModal();
     $("#updated").textContent=new Date().toLocaleTimeString();
     await loadMigrations();
     if(!$("#tab-queue").classList.contains("hidden")) loadQueue();
@@ -667,8 +751,9 @@ let pollTimer=null;
 function startPolling(){ stopPolling(); const ms=+$("#refreshSel").value; if(ms>0) pollTimer=setInterval(refresh,ms); }
 function stopPolling(){ if(pollTimer) clearInterval(pollTimer); pollTimer=null; }
 function switchTab(name){ document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===name));
-  for(const n of ["projects","jobs","queue","migrations","drafts"]) $("#tab-"+n).classList.toggle("hidden",n!==name);
-  if(name==="queue") loadQueue(); }
+  for(const n of ["projects","jobs","queue","migrations","drafts","finished"]) $("#tab-"+n).classList.toggle("hidden",n!==name);
+  if(name==="queue") loadQueue();
+  if(name==="finished") renderFinished(); }
 
 function wire(){
   $("#refreshBtn").onclick=refresh;
@@ -681,6 +766,7 @@ function wire(){
   document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>switchTab(t.dataset.tab));
   $("#addProjBtn").onclick=async()=>{ const p=$("#projPath").value.trim(); if(!p) return; try{ await api.post("/api/projects",{path:p}); $("#projPath").value=""; loadProjects(); }catch(e){ toast(e.message,"bad"); } };
   $("#projPath").addEventListener("keydown",e=>{ if(e.key==="Enter") $("#addProjBtn").click(); });
+  $("#clearFinBtn").onclick=()=>{ for(const k of FINISHED.keys()) FIN_GONE.add(k); FINISHED.clear(); renderFinished(); };
   $("#clearMigBtn").onclick=async()=>{ await Promise.all([api.post("/api/migrations/clear",{}),api.post("/api/transfers/clear",{}),api.post("/api/monitors/clear",{})]); loadMigrations(); };
   // submit modal
   $("#subClose").onclick=$("#subCancel").onclick=()=>$("#subModal").classList.add("hidden");
@@ -727,5 +813,6 @@ async function init(){
   $("#queueType").innerHTML='<option value="">all GPU</option>'+allTypes.map(t=>`<option>${t}</option>`).join("");
   await loadProjects(); await loadDrafts();
   startPolling();
+  setInterval(tickFinished,1000);   // countdown + 3-min auto-expiry, independent of polling
 }
 init();

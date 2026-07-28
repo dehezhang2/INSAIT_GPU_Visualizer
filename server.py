@@ -119,9 +119,15 @@ class Handler(BaseHTTPRequestHandler):
                 if o:
                     j["origin"] = {"project": o.get("project"), "job_key": o.get("job_key"),
                                    "submission_id": o.get("id")}
+            fin = slurm.finished_jobs()
+            for j in fin:
+                o = origin.get(str(j["id"]).split("_")[0])
+                if o:
+                    j["origin"] = {"project": o.get("project"), "job_key": o.get("job_key"),
+                                   "submission_id": o.get("id")}
             return self._json({
                 "me": slurm.USER, "site": slurm.current_site(),
-                "nodes": slurm.nodes(), "jobs": jobs,
+                "nodes": slurm.nodes(), "jobs": jobs, "finished": fin,
                 "partitions": slurm.usable_gpu_partitions(),
             })
         if path == "/api/qos":

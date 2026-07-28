@@ -61,6 +61,13 @@ catalog job (e.g. holder → real eval).
 
 **Ad-hoc** — one-off jobs not tied to a repo (full sbatch editor).
 
+**Finished** — a job that reaches a terminal state leaves **Jobs** and lands here
+with its real outcome from `sacct` (COMPLETED / FAILED / CANCELLED / TIMEOUT +
+exit code + elapsed). Read-only: `logs` still works while Slurm remembers the
+job, `swap→` is disabled — you cannot hand off a node that is already released.
+Each card self-clears 3 minutes after the job ended (`clear` / `dismiss` to drop
+it sooner); cleared cards never come back.
+
 ## Why QOS matters on this cluster (and "spread across nodes" doesn't)
 
 Scheduling is `sched/backfill` with `PriorityWeightQOS` ≈ 1e9, dwarfing age /

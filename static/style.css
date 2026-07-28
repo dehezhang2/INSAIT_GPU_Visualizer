@@ -87,9 +87,9 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 6px var(--side-w,380px);ga
 
 /* side panel */
 .side{background:#0c0f14}
-.tabs{display:flex;gap:6px;margin-bottom:12px}
-.tab{flex:1;background:var(--panel2);border:1px solid var(--line);border-radius:6px;
-  padding:7px;cursor:pointer;color:var(--muted)}
+.tabs{display:flex;gap:5px;margin-bottom:12px;flex-wrap:wrap}
+.tab{flex:1 1 92px;min-width:0;background:var(--panel2);border:1px solid var(--line);border-radius:6px;
+  padding:7px 5px;font-size:12px;white-space:nowrap;cursor:pointer;color:var(--muted)}
 .tab.active{color:#fff;border-color:var(--accent)}
 .pill{display:inline-block;min-width:16px;font-size:10px;background:var(--line);
   border-radius:9px;padding:0 5px;color:var(--text)}
@@ -106,10 +106,20 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 6px var(--side-w,380px);ga
 .state.RUNNING{background:rgba(46,204,113,.15);color:var(--run)}
 .state.PENDING{background:rgba(245,166,35,.15);color:var(--pend)}
 .state.OTHER{background:var(--line);color:var(--muted)}
+.state.DONE{background:rgba(46,204,113,.15);color:var(--good)}
+.state.FAIL{background:rgba(224,85,107,.15);color:var(--bad)}
 .card-meta{font-size:11px;color:var(--muted);margin:5px 0 7px;display:flex;gap:10px;flex-wrap:wrap}
 .gchip{color:var(--text)}
 .reason{font-style:italic}
 .card-actions{display:flex;gap:6px;flex-wrap:wrap}
+
+/* finished jobs: read-only, self-expiring */
+.card.finished{border-left:3px solid var(--used2);opacity:.9}
+.card.finished.done{border-left-color:var(--good)}
+.card.finished.fail{border-left-color:var(--bad)}
+.card.finished .fincd{margin-left:auto;font-variant-numeric:tabular-nums}
+.btn.off,.btn[disabled]{opacity:.35;cursor:not-allowed;text-decoration:line-through}
+.btn.off:hover,.btn[disabled]:hover{border-color:var(--line)}
 
 .draft.card{border-left:3px solid var(--accent2)}
 .draft.holder{border-left-color:var(--warn)}

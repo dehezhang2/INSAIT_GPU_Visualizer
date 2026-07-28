@@ -48,6 +48,7 @@
       <button class="tab" data-tab="queue">Queue <span id="queueCount" class="pill"></span></button>
       <button class="tab" data-tab="migrations">Migrations <span id="migCount" class="pill"></span></button>
       <button class="tab" data-tab="drafts">Ad-hoc <span id="draftsCount" class="pill"></span></button>
+      <button class="tab" data-tab="finished">Finished <span id="finCount" class="pill"></span></button>
     </div>
 
     <div id="tab-projects" class="tab-body">
@@ -84,6 +85,14 @@
       </div>
       <p class="hint">不挂靠 repo 的一次性任务。拖到左边空闲节点可锁定 --nodelist。</p>
       <div id="draftsBody"></div>
+    </div>
+
+    <div id="tab-finished" class="tab-body hidden">
+      <div class="addrow">
+        <div class="hint" style="flex:1;margin:0">任务结束后自动从 Jobs 移到这里。已结束的任务不能再 swap / 迁移;卡片停留 3 分钟后自动清除。</div>
+        <button class="btn ghost sm" id="clearFinBtn">clear</button>
+      </div>
+      <div id="finishedBody"></div>
     </div>
   </aside>
 </main>

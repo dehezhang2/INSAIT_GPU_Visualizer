@@ -542,6 +542,85 @@ def my_jobs(ttl: float = 4.0) -> list[dict]:
     return _cached("jobs", ttl, fn)
 
 
+# ---------------------------------------------------------------------------
+# recently finished jobs (squeue forgets them, sacct remembers)
+# ---------------------------------------------------------------------------
+
+TERMINAL_STATES = {
+    "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
+    "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE", "REVOKED",
+    "SPECIAL_EXIT",
+}
+
+_SACCT_FIELDS = ["JobID", "JobIDRaw", "JobName", "State", "ExitCode", "Elapsed",
+                 "End", "Partition", "NodeList", "ReqTRES", "WorkDir"]
+
+
+def _sacct_time(s: str) -> float | None:
+    try:
+        return time.mktime(time.strptime(s, "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return None
+
+
+def _sacct_elapsed(s: str) -> int | None:
+    """'01:02:03' / '2-01:02:03' -> seconds."""
+    days, _, rest = s.rpartition("-")
+    try:
+        parts = [int(x) for x in rest.split(":")]
+    except ValueError:
+        return None
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    h, m, sec = parts[-3:]
+    return ((int(days) if days else 0) * 24 + h) * 3600 + m * 60 + sec
+
+
+def finished_jobs(window_min: int = 6, ttl: float = 8.0) -> list[dict]:
+    """The user's jobs that reached a terminal state within the last
+    `window_min` minutes, newest first. Empty if accounting is unavailable."""
+
+    def fn():
+        try:
+            out = _run(["sacct", "-u", USER, "-X", "-n", "-P",
+                        "-S", f"now-{window_min}minutes",
+                        "-o", ",".join(_SACCT_FIELDS)], timeout=15)
+        except SlurmError:
+            return []
+        rows = []
+        for line in out.splitlines():
+            f = line.split("|")
+            if len(f) < len(_SACCT_FIELDS):
+                continue
+            jid, raw, name, state, exit_code, elapsed, end, part, nodelist, tres, wd = \
+                f[:len(_SACCT_FIELDS)]
+            base = state.split()[0] if state else ""
+            if base not in TERMINAL_STATES:
+                continue
+            gpus, gtype = _parse_tres_gpu(tres)
+            code, _, sig = exit_code.partition(":")
+            rows.append({
+                "id": jid,
+                "job_id": raw or jid,
+                "name": name,
+                "state": base,
+                "state_detail": state,
+                "exit_code": int(code) if code.isdigit() else None,
+                "signal": int(sig) if sig.isdigit() else None,
+                "elapsed_s": _sacct_elapsed(elapsed),
+                "end_time": _sacct_time(end),
+                "partition": part,
+                "nodes": "" if nodelist in ("None assigned", "None") else nodelist,
+                "gpus": gpus,
+                "gpu_type": gtype,
+                "workdir": wd,
+            })
+        rows.sort(key=lambda r: -(r["end_time"] or 0))
+        return rows
+
+    return _cached(f"finished:{window_min}", ttl, fn)
+
+
 def job_detail(job_id) -> dict | None:
     """Full parsed record for a single job (used by the migration engine)."""
     try:
