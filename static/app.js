@@ -391,6 +391,7 @@ function jobCard(j){
   meta.innerHTML=`${gpu}<span>${j.partition||""}${j.time_limit_min?" · "+fmtMin(j.time_limit_min):""}</span><span>${where}</span>`;
   c.appendChild(meta);
   const act=ce("div","card-actions");
+  act.appendChild(btn("info","sm ghost",()=>openJobInfo(j)));
   act.appendChild(btn("logs","sm ghost",()=>openLog(j)));
   if(j.state==="PENDING"){
     act.appendChild(btn("hold","sm ghost",()=>jobAction(j.job_id,"hold")));
@@ -408,6 +409,51 @@ function editPending(j){
   if(!v) return; const fields={};
   for(const part of v.split(",")){ const i=part.indexOf("="); if(i>0) fields[part.slice(0,i).trim()]=part.slice(i+1).trim(); }
   api.post(`/api/jobs/${j.job_id}/update`,fields).then(()=>{toast("updated ✓","good");refresh();}).catch(e=>toast("update 失败: "+e.message,"bad"));
+}
+// job info modal: everything squeue knows about one job (live while open)
+let JOB_INFO_OPEN=null, JOB_INFO_SNAP=null;   // id string + last snapshot (kept if job leaves squeue)
+function fmtTs(sec){ return sec?new Date(sec*1000).toLocaleString("sv-SE"):""; }
+function openJobInfo(j){ JOB_INFO_OPEN=String(j.id); JOB_INFO_SNAP=j; renderJobInfo(); $("#jobInfoModal").classList.remove("hidden"); }
+function closeJobInfo(){ JOB_INFO_OPEN=null; JOB_INFO_SNAP=null; $("#jobInfoModal").classList.add("hidden"); }
+function renderJobInfo(){
+  if(!JOB_INFO_OPEN) return;
+  const live=STATE.jobs.find(x=>String(x.id)===JOB_INFO_OPEN);
+  const j=live||JOB_INFO_SNAP; if(!j) return;
+  if(live) JOB_INFO_SNAP=live;
+  $("#jobInfoTitle").textContent=`${j.id} · ${j.name||""}`;
+  $("#jobInfoLive").textContent=live?"实时(随轮询刷新)":"任务已不在队列,显示最后快照";
+  const nowSec=Date.now()/1000;
+  const rows=[];
+  const add=(k,v)=>{ if(v!==""&&v!=null) rows.push(`<span class="k">${k}</span><span class="v">${v}</span>`); };
+  const sep=()=>rows.push('<span class="sep"></span>');
+  add("Job ID",esc(j.id));
+  add("名称",esc(j.name||""));
+  add("用户",esc(STATE.me||""));
+  add("状态",`${esc(j.state)}${j.state_full&&j.state_full.length>1?" ("+esc(j.state_full.join(","))+")":""}`);
+  sep();
+  add("分区",esc(j.partition||""));
+  add("QoS",esc(j.qos||""));
+  add("账户",esc(j.account||""));
+  add("GPU",j.gpus?`${j.gpus} × ${esc(j.gpu_type||"gpu")}`:"无");
+  add("节点数",j.node_count);
+  if(j.nodes) add("节点",esc(j.nodes));
+  sep();
+  if(j.state==="RUNNING"&&j.start_time){
+    add("开始时间",fmtTs(j.start_time));
+    add("已运行",fmtDur(Math.floor(nowSec-j.start_time)));
+    if(j.time_limit_min) add("剩余时间",fmtDur(Math.max(0,j.start_time+j.time_limit_min*60-nowSec)));
+  }
+  if(j.state==="PENDING"){
+    add("预计开始",j.start_time?fmtTs(j.start_time):"未知(调度器尚未给出)");
+    add("排队原因",esc(j.reason||""));
+    add("已等待",j.submit_time?fmtDur(Math.floor(nowSec-j.submit_time)):"");
+  }
+  add("时限",fmtMin(j.time_limit_min));
+  add("提交时间",fmtTs(j.submit_time));
+  sep();
+  add("工作目录",esc(j.workdir||""));
+  add("命令",esc(j.command||""));
+  $("#jobInfoBody").innerHTML=rows.join("");
 }
 // handoff: replace a running job with a catalog job on the same node (make-before-break)
 function openSwap(anchor,j){
@@ -461,10 +507,10 @@ function ingestFinished(){
 }
 function pruneFinished(){
   const now=Date.now(); let changed=false;
-  for(const [k,f] of FINISHED) if(now>=finExpiry(f)){ FINISHED.delete(k); FIN_GONE.add(k); changed=true; }
+  for(const [k,f] of FINISHED) if(!f.fixed&&now>=finExpiry(f)){ FINISHED.delete(k); FIN_GONE.add(k); changed=true; }
   return changed;
 }
-function finLeft(f){ return Math.max(0,Math.ceil((finExpiry(f)-Date.now())/1000))+"s 后清除"; }
+function finLeft(f){ return f.fixed?"已固定,不会自动清除":Math.max(0,Math.ceil((finExpiry(f)-Date.now())/1000))+"s 后清除"; }
 function finCls(s){ return s==="COMPLETED"?"DONE":(s==="CANCELLED"||s==="ENDED")?"OTHER":"FAIL"; }
 function renderFinished(){
   pruneFinished();
@@ -492,6 +538,13 @@ function finishedCard(f){
   c.appendChild(meta);
   const act=ce("div","card-actions");
   act.appendChild(btn("logs","sm ghost",()=>openLog({job_id:f.job_id,id:f.id,name:f.name})));
+  const fx=btn(f.fixed?"unfix":"fix","sm ghost",()=>{
+    f.fixed=!f.fixed;
+    if(!f.fixed) f.firstSeen=Date.now();   // unfix 后至少留 15s,避免瞬间消失
+    renderFinished();
+  });
+  fx.title=f.fixed?"取消固定,恢复 3 分钟后自动清除":"固定此任务,不再 3 分钟后自动清除";
+  act.appendChild(fx);
   const sw=btn("swap→","sm ghost off",()=>{});
   sw.disabled=true; sw.title="任务已结束,无法再 swap / 接管";
   act.appendChild(sw);
@@ -731,7 +784,7 @@ function renderQueue(){
 async function refresh(){
   try{ STATE=await api.get("/api/state"); $("#banner").classList.add("hidden");
     ingestFinished();
-    renderCluster(); renderJobs(); renderFinished(); renderHeader(); renderNodeModal();
+    renderCluster(); renderJobs(); renderFinished(); renderHeader(); renderNodeModal(); renderJobInfo();
     $("#updated").textContent=new Date().toLocaleTimeString();
     await loadMigrations();
     if(!$("#tab-queue").classList.contains("hidden")) loadQueue();
@@ -780,6 +833,9 @@ function wire(){
   // node zoom-in modal
   $("#nodeClose").onclick=closeNode;
   $("#nodeModal").addEventListener("click",e=>{ if(e.target.id==="nodeModal") closeNode(); });
+  // job info modal
+  $("#jobInfoClose").onclick=closeJobInfo;
+  $("#jobInfoModal").addEventListener("click",e=>{ if(e.target.id==="jobInfoModal") closeJobInfo(); });
   // log modal
   $("#logClose").onclick=closeLog;
   document.querySelectorAll(".ltab").forEach(t=>t.onclick=()=>{ LOG.stream=t.dataset.stream; document.querySelectorAll(".ltab").forEach(x=>x.classList.toggle("active",x===t)); renderLog(); });
@@ -814,5 +870,6 @@ async function init(){
   await loadProjects(); await loadDrafts();
   startPolling();
   setInterval(tickFinished,1000);   // countdown + 3-min auto-expiry, independent of polling
+  setInterval(renderJobInfo,1000);  // keep 已运行/剩余时间 ticking while the info modal is open
 }
 init();
