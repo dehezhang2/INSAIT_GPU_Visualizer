@@ -538,7 +538,7 @@ function finishedCard(f){
   c.appendChild(meta);
   const act=ce("div","card-actions");
   act.appendChild(btn("logs","sm ghost",()=>openLog({job_id:f.job_id,id:f.id,name:f.name})));
-  const fx=btn(f.fixed?"unfix":"fix","sm ghost",()=>{
+  const fx=btn(f.fixed?"unfix":"fix","sm ghost"+(f.fixed?" stopon":""),()=>{
     f.fixed=!f.fixed;
     if(!f.fixed) f.firstSeen=Date.now();   // unfix 后至少留 15s,避免瞬间消失
     renderFinished();
@@ -651,9 +651,15 @@ async function stageDep(it){
 // ===========================================================================
 // LOG VIEWER
 // ===========================================================================
-let LOG={job:null,stream:"out",timer:null,data:null};
+let LOG={job:null,stream:"out",timer:null,data:null,stopped:false};
+function setLogStopped(v){
+  const was=LOG.stopped; LOG.stopped=v;
+  $("#logStop").classList.toggle("stopon",v);
+  $("#logStop").title=v?"已暂停更新,点击恢复":"暂停/恢复日志内容更新";
+  if(was&&!v) fetchLog();   // resume: catch up immediately instead of waiting for the next tick
+}
 async function openLog(j){
-  LOG.job=j; LOG.stream="out";
+  LOG.job=j; LOG.stream="out"; setLogStopped(false);
   $("#logTitle").textContent=`${j.id} · ${j.name}`;
   document.querySelectorAll(".ltab").forEach(t=>t.classList.toggle("active",t.dataset.stream==="out"));
   $("#logModal").classList.remove("hidden");
@@ -675,7 +681,7 @@ function renderLog(){
   pre.textContent=s.text||(s.exists?"(空)":"(等待日志生成…)");
   if(follow) pre.scrollTop=pre.scrollHeight;
 }
-function startLogFollow(){ stopLogFollow(); LOG.timer=setInterval(()=>{ if($("#logFollow").checked) fetchLog(); },3000); }
+function startLogFollow(){ stopLogFollow(); LOG.timer=setInterval(()=>{ if(!LOG.stopped&&$("#logFollow").checked) fetchLog(); },3000); }
 function stopLogFollow(){ if(LOG.timer) clearInterval(LOG.timer); LOG.timer=null; }
 function closeLog(){ $("#logModal").classList.add("hidden"); stopLogFollow(); LOG.job=null; }
 
@@ -837,6 +843,7 @@ function wire(){
   $("#jobInfoClose").onclick=closeJobInfo;
   $("#jobInfoModal").addEventListener("click",e=>{ if(e.target.id==="jobInfoModal") closeJobInfo(); });
   // log modal
+  $("#logStop").onclick=()=>setLogStopped(!LOG.stopped);
   $("#logClose").onclick=closeLog;
   document.querySelectorAll(".ltab").forEach(t=>t.onclick=()=>{ LOG.stream=t.dataset.stream; document.querySelectorAll(".ltab").forEach(x=>x.classList.toggle("active",x===t)); renderLog(); });
   $("#logModal").addEventListener("click",e=>{ if(e.target.id==="logModal") closeLog(); });

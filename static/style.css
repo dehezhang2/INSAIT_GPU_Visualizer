@@ -296,3 +296,7 @@ code{background:#0b0e13;border:1px solid var(--line);border-radius:4px;padding:0
 .jobinfo-body .k{color:var(--muted);white-space:nowrap}
 .jobinfo-body .v{word-break:break-all;font-family:ui-monospace,Menlo,Consolas,monospace}
 .jobinfo-body .sep{grid-column:1/-1;border-top:1px solid var(--line);margin:4px 0}
+
+/* log stop toggle: lit while paused */
+.btn.stopon{background:var(--warn);border-color:var(--warn);color:#1a1200;font-weight:600}
+.btn.stopon:hover{border-color:var(--warn);filter:brightness(1.08)}
