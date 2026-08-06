@@ -21,18 +21,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
 import auth
-import catalog
-import deps
 import drafts
 import groups
 import logs
 import migrate
 import monitors
-import projects
 import sbatch
 import slurm
-import submitter
 import transfer
+import usage
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
@@ -158,22 +155,12 @@ class Handler(BaseHTTPRequestHandler):
     def _get(self, path, q):
         if path == "/api/state":
             jobs = slurm.my_jobs()
-            origin = submitter.by_job_id()
-            for j in jobs:
-                o = origin.get(str(j["job_id"]).split("_")[0])
-                if o:
-                    j["origin"] = {"project": o.get("project"), "job_key": o.get("job_key"),
-                                   "submission_id": o.get("id")}
             fin = slurm.finished_jobs()
-            for j in fin:
-                o = origin.get(str(j["id"]).split("_")[0])
-                if o:
-                    j["origin"] = {"project": o.get("project"), "job_key": o.get("job_key"),
-                                   "submission_id": o.get("id")}
             g = groups.snapshot()
             for j in jobs:
-                j["folder"] = groups.resolve(j["job_id"], j.get("name"),
-                                             (j.get("origin") or {}).get("project"), g)
+                j["folder"] = groups.resolve(j["job_id"], j.get("name"), g)
+            for j in fin:
+                j["folder"] = groups.resolve(j["id"], j.get("name"), g)
             return self._json({
                 "me": slurm.USER, "site": slurm.current_site(),
                 "nodes": slurm.nodes(), "jobs": jobs, "finished": fin,
@@ -184,13 +171,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"qos": slurm.my_qos()})
         if path == "/api/queue":
             return self._queue()
-        if path == "/api/projects":
-            return self._json({"projects": [projects.status(p) for p in projects.list_projects()]})
-        m = re.fullmatch(r"/api/projects/(\d+)/catalog", path)
-        if m:
-            return self._project_catalog(int(m.group(1)))
-        if path == "/api/submissions":
-            return self._json({"submissions": submitter.list_submissions()})
+        if path == "/api/usage":
+            days = max(1, min(365, int((q.get("days") or ["30"])[0])))
+            return self._json(usage.summary(days))
         if path == "/api/drafts":
             return self._json({"drafts": drafts.list_drafts()})
         if path == "/api/migrations":
@@ -245,15 +228,6 @@ class Handler(BaseHTTPRequestHandler):
             r["rank"] = i + 1 if r["waiting"] else None
         return self._json({"queue": rows, "summary": summary, "me": slurm.USER})
 
-    def _project_catalog(self, pid):
-        p = projects.get(pid)
-        if not p:
-            return self._json({"error": "no such project"}, 404)
-        cat = catalog.load(p["path"])
-        for spec in cat["jobs"]:
-            spec["deps"] = deps.check(spec.get("needs"))
-        return self._json({"project": p, "catalog": cat})
-
     # -- DELETE -----------------------------------------------------------
     def do_DELETE(self):
         u = urlparse(self.path)
@@ -265,15 +239,6 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/drafts/(\d+)", path)
         if m:
             ok = drafts.delete(int(m.group(1)))
-            return self._json({"ok": ok}, 200 if ok else 404)
-        m = re.fullmatch(r"/api/projects/(\d+)", path)
-        if m:
-            ok = projects.remove(int(m.group(1)))
-            return self._json({"ok": ok}, 200 if ok else 404)
-        m = re.fullmatch(r"/api/submissions/(\d+)", path)
-        if m:
-            keep = (q.get("keep_snapshot") or ["0"])[0] in ("1", "true")
-            ok = submitter.delete_submission(int(m.group(1)), remove_snapshot=not keep)
             return self._json({"ok": ok}, 200 if ok else 404)
         m = re.fullmatch(r"/api/monitors/([\w.:-]+)", path)
         if m:
@@ -300,18 +265,6 @@ class Handler(BaseHTTPRequestHandler):
         return self.do_POST()
 
     def _post(self, path, body):
-        # ---- projects ---------------------------------------------------
-        if path == "/api/projects":
-            if not body.get("path"):
-                return self._json({"error": "path required"}, 400)
-            return self._json({"project": projects.add(body["path"], body.get("name"))})
-        m = re.fullmatch(r"/api/projects/(\d+)/submit", path)
-        if m:
-            return self._submit_catalog(int(m.group(1)), body)
-        m = re.fullmatch(r"/api/projects/(\d+)/preview", path)
-        if m:
-            return self._preview_catalog(int(m.group(1)), body)
-
         # ---- migration --------------------------------------------------
         if path == "/api/migrate":
             return self._migrate(body)
@@ -364,7 +317,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/monitors/clear":
             return self._json({"cleared": monitors.clear_finished()})
 
-        # ---- ad-hoc drafts (secondary) ----------------------------------
+        # ---- job templates (the submit path) ----------------------------
         if path == "/api/drafts":
             kind = body.pop("kind", "normal")
             return self._json({"draft": drafts.create(body, kind=kind)})
@@ -391,40 +344,6 @@ class Handler(BaseHTTPRequestHandler):
 
         return self._json({"error": "not found"}, 404)
 
-    # -- catalog submit / preview ----------------------------------------
-    def _find_spec(self, pid, job_key):
-        p = projects.get(pid)
-        if not p:
-            raise FileNotFoundError("no such project")
-        cat = catalog.load(p["path"])
-        for s in cat["jobs"]:
-            if s["key"] == job_key:
-                return p, s
-        raise FileNotFoundError(f"no job '{job_key}' in catalog")
-
-    def _submit_catalog(self, pid, body):
-        p, spec = self._find_spec(pid, body.get("job_key"))
-        rec = submitter.submit_spec(p, spec, body.get("overrides") or {})
-        return self._json({"ok": True, "submission": rec})
-
-    def _preview_catalog(self, pid, body):
-        p, spec = self._find_spec(pid, body.get("job_key"))
-        merged = {**spec, **{k: v for k, v in (body.get("overrides") or {}).items()
-                             if v not in (None, "")}}
-        if spec.get("script_file"):
-            src = spec["script_file"]
-            if not os.path.isabs(src):
-                src = os.path.join(p["path"], src)
-            try:
-                with open(src) as f:
-                    text = f.read()
-                note = f"# (script_file: {src}; overrides applied as sbatch CLI flags)\n"
-                return self._json({"sbatch": note + text,
-                                   "extra": submitter._override_args(merged)})
-            except OSError as e:
-                return self._json({"error": str(e)}, 400)
-        return self._json({"sbatch": sbatch.render(merged)})
-
     # -- migration dispatch ----------------------------------------------
     def _migrate(self, body):
         src = str(body.get("src_job_id") or "").strip()
@@ -434,20 +353,30 @@ class Handler(BaseHTTPRequestHandler):
         mode = body.get("mode", "clone")
 
         if mode == "handoff":
-            p, spec = self._find_spec(int(body["project_id"]), body.get("job_key"))
-            ov = {**(body.get("overrides") or {}), "nodelist": node}
+            did = int(body.get("draft_id") or 0)
+            tmpl = drafts.get(did)
+            if not tmpl:
+                return self._json({"error": "no such job template"}, 404)
 
             def submit_fn():
-                return submitter.submit_spec(p, spec, ov)["job_id"]
+                # pin to the node for this run only — don't rewrite the template
+                pinned = {**tmpl, "nodelist": node}
+                path = drafts.write_sbatch_file(pinned)
+                jid = slurm.submit(path, workdir=pinned.get("workdir")
+                                   or os.path.expanduser("~"))
+                drafts.mark_submitted(did, jid)
+                if pinned.get("project"):
+                    groups.assign(jid, pinned.get("name"), pinned["project"])
+                return jid
 
-            label = f"handoff {spec['key']} → {node} (replace {src})"
+            label = f"handoff {tmpl.get('name') or did} → {node} (replace {src})"
         else:  # clone
             d = slurm.job_detail(src)
             if not d:
                 return self._json({"error": f"job {src} not found"}, 404)
             script, workdir = d.get("command"), d.get("workdir") or os.path.expanduser("~")
             if not script or not os.path.isfile(script):
-                return self._json({"error": "原任务脚本不可读,无法克隆迁移;可用 handoff 模式指定一个 repo 任务"}, 400)
+                return self._json({"error": "原任务脚本不可读,无法克隆迁移;可用 handoff 模式选一个任务模板"}, 400)
             extra = ["--nodelist=" + node]
             if body.get("partition"):
                 extra.append("--partition=" + body["partition"])

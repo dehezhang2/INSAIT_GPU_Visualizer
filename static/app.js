@@ -21,7 +21,7 @@ function fmtAge(s){ if(s==null) return ""; if(s<60) return s+"s 前"; if(s<3600)
 
 // ---- state -----------------------------------------------------------------
 let STATE={nodes:[],jobs:[],finished:[],partitions:[],me:"",site:""};
-let PROJECTS=[], CATALOGS={}, QOS=[], MIGRATIONS=[], DRAFTS=[], HELP={};
+let QOS=[], MIGRATIONS=[], DRAFTS=[], HELP={};
 let FILTERS={onlyFree:false,onlyMine:false,type:""};
 // finished jobs: shown in their own tab, auto-dropped 3 min after they end
 const FIN_TTL_MS=180000;
@@ -255,120 +255,6 @@ async function onDropNode(node){
 }
 
 // ===========================================================================
-// PROJECTS + CATALOG
-// ===========================================================================
-async function loadProjects(){
-  PROJECTS=(await api.get("/api/projects")).projects;
-  $("#projCount").textContent=PROJECTS.length;
-  await Promise.all(PROJECTS.map(p=>loadCatalog(p.id)));
-  renderProjects();
-}
-async function loadCatalog(pid){
-  try{ CATALOGS[pid]=(await api.get(`/api/projects/${pid}/catalog`)).catalog; }
-  catch(e){ CATALOGS[pid]={error:e.message,jobs:[]}; }
-}
-function renderProjects(){
-  const body=$("#projectsBody"); body.innerHTML="";
-  if(!PROJECTS.length){ body.innerHTML='<div class="empty">还没注册项目。填 repo 路径点 Add。</div>'; return; }
-  for(const p of PROJECTS){
-    const cat=CATALOGS[p.id]||{jobs:[]};
-    const card=ce("div","project");
-    const head=ce("div","project-head");
-    head.innerHTML=`<span class="pname">${esc(cat.project||p.name)}</span><span class="ppath">${esc(p.path)}</span>`;
-    const rm=btn("✕","ghost sm",ev=>{ev.stopPropagation(); removeProject(p);});
-    head.appendChild(rm);
-    card.appendChild(head);
-    const pb=ce("div","project-body");
-    if(!p.exists) pb.innerHTML=`<div class="cfgwarn">路径不存在</div>`;
-    else if(cat.error) pb.innerHTML=`<div class="cfgwarn">${esc(cat.error)}</div>`;
-    else if(!cat.jobs.length) pb.innerHTML=`<div class="cfgwarn">gpuviz.toml 里没有 [[job]]</div>`;
-    else for(const spec of cat.jobs) pb.appendChild(catalogJob(p,spec));
-    card.appendChild(pb);
-    body.appendChild(card);
-  }
-}
-function catalogJob(proj,spec){
-  const c=ce("div","cjob"+(spec.kind==="holder"?" holder":""));
-  const n=Math.max(1,Math.min(8,+spec.gpus||1));
-  const top=ce("div","cjob-top");
-  top.innerHTML=`<span class="gpublock">${"<i></i>".repeat(n)}</span><span class="ckey">${esc(spec.key)}</span>`;
-  const dep=spec.deps||{overall:"none"};
-  const depBadge=ce("span","dep "+dep.overall);
-  depBadge.textContent={ok:"data ✓",none:"no deps",missing:"data ✗",small:"data ⚠",remote:"data ⇄"}[dep.overall]||dep.overall;
-  top.appendChild(depBadge);
-  c.appendChild(top);
-  const meta=ce("div","cjob-meta");
-  const src=spec.script_file?`file:${spec.script_file.split("/").pop()}`:(spec.command?spec.command.slice(0,40):"inline");
-  meta.innerHTML=`<span>${spec.gpus}×${spec.gpu_type||"gpu"}</span><span>${spec.time||""}</span><span>${esc(src)}</span>`;
-  c.appendChild(meta);
-  const bad=(dep.items||[]).filter(i=>i.status!=="ok");
-  if(bad.length){
-    const dl=ce("div","deplist");
-    for(const it of bad){
-      const row=ce("div"); row.textContent=`[${it.status}] ${it.raw_path} — ${it.detail}`;
-      if(it.stageable){ const sb=btn("stage ⇄","sm ghost",()=>stageDep(it)); sb.style.marginLeft="6px"; row.appendChild(sb); }
-      dl.appendChild(row);
-    }
-    c.appendChild(dl);
-  }
-  const act=ce("div","card-actions");
-  act.appendChild(btn("preview / submit","sm primary",()=>openSubmit(proj,spec)));
-  c.appendChild(act);
-  return c;
-}
-async function removeProject(p){ if(!confirm(`移除项目「${p.name}」?(不删 repo 文件)`)) return; await api.del(`/api/projects/${p.id}`); delete CATALOGS[p.id]; loadProjects(); }
-
-// ===========================================================================
-// SUBMIT / OVERRIDE MODAL
-// ===========================================================================
-const OVR=[["name","Name","text"],["gpus","GPUs","number"],["gpu_type","GPU type","gtype"],
-  ["nodes","Nodes","number"],["cpus","CPUs","number"],["mem","Mem","text"],["time","Time","text"],
-  ["partition","Partition","text"],["qos","QOS","qos"],["nodelist","Nodelist","text"],
-  ["exclude","Exclude","text"],["array","Array","text"]];
-let SUB=null; // {proj, spec}
-let subTimer=null;
-function openSubmit(proj,spec){
-  SUB={proj,spec};
-  $("#subTitle").textContent=`${proj.name} · ${spec.key}`;
-  $("#subErr").textContent="";
-  const f=$("#subForm"); f.innerHTML="";
-  for(const [k,label,t] of OVR){
-    const wrap=ce("div","field");
-    const lab=ce("label"); lab.textContent=label;
-    const q=ce("span","q"); q.textContent="?"; q.dataset.help=k==="gpus"?"gpus":k; lab.appendChild(q);
-    wrap.appendChild(lab);
-    let inp;
-    if(t==="qos"){
-      inp=ce("select"); inp.innerHTML='<option value="">(default)</option>'+
-        QOS.map(qq=>`<option value="${qq.name}">${qq.name} · prio ${qq.priority_pct}%${qq.can_preempt?" ⚡":""}</option>`).join("");
-    } else if(t==="gtype"){ inp=ce("input"); inp.setAttribute("list","gtypes"); inp.placeholder="任意"; }
-    else { inp=ce("input"); inp.type=t==="number"?"number":"text"; }
-    inp.id="o_"+k; inp.value=spec[k]??""; inp.addEventListener("input",subPreview);
-    inp.addEventListener("change",subPreview);
-    wrap.appendChild(inp); f.appendChild(wrap);
-  }
-  const note=ce("div","qosnote"); note.innerHTML="QOS 几乎决定起跑优先级(本集群 QOS 权重压倒 age/fairshare)。debug 最高但常受 4h 限制;其余基本同级。"; f.appendChild(note);
-  let dl=ce("datalist"); dl.id="gtypes"; dl.innerHTML=[...new Set(STATE.nodes.flatMap(n=>n.gpu_types))].map(t=>`<option value="${t}">`).join(""); f.appendChild(dl);
-  $("#subModal").classList.remove("hidden");
-  subPreview();
-}
-function subOverrides(){ const o={}; for(const [k] of OVR){ const el=$("#o_"+k); if(el&&el.value!=="") o[k]=el.value; } if(o.gpus)o.gpus=+o.gpus; if(o.nodes)o.nodes=+o.nodes; if(o.cpus)o.cpus=+o.cpus; return o; }
-function subPreview(){ if(subTimer)clearTimeout(subTimer); $("#subPrevStatus").textContent="…";
-  subTimer=setTimeout(async()=>{ try{ const r=await api.post(`/api/projects/${SUB.proj.id}/preview`,{job_key:SUB.spec.key,overrides:subOverrides()});
-    $("#subPrev").textContent=r.sbatch; $("#subPrevStatus").textContent=r.extra&&r.extra.length?("+ "+r.extra.join(" ")):""; }
-    catch(e){ $("#subPrevStatus").textContent="预览失败"; } },250); }
-function maxSched(){
-  $("#o_nodelist").value=""; $("#o_gpu_type").value=""; $("#o_partition").value=STATE.partitions.join(",");
-  subPreview(); toast("已切到最大可调度:任意卡型 + 多分区 + 不钉节点。建议把 Time 收紧以利 backfill。","good");
-}
-async function doSubmit(){
-  try{ const r=await api.post(`/api/projects/${SUB.proj.id}/submit`,{job_key:SUB.spec.key,overrides:subOverrides()});
-    toast(`已提交 ✓ job ${r.submission.job_id}(快照已存入 repo)`,"good");
-    $("#subModal").classList.add("hidden"); refresh(); }
-  catch(e){ $("#subErr").textContent=e.message; }
-}
-
-// ===========================================================================
 // JOBS (management)
 // ===========================================================================
 function liveJobs(){ return STATE.jobs.filter(j=>!TERMINAL.has(j.state)&&!FINISHED.has(String(j.id))); }
@@ -499,15 +385,14 @@ function renderJobInfo(){
   add("命令",esc(j.command||""));
   $("#jobInfoBody").innerHTML=rows.join("");
 }
-// handoff: replace a running job with a catalog job on the same node (make-before-break)
+// handoff: replace a running job with a job template on the same node (make-before-break)
 function openSwap(anchor,j){
   if(FINISHED.has(String(j.id))||TERMINAL.has(j.state)){ toast(`${j.id} 已结束,无法 swap`,"bad"); return; }
-  const items=[];
-  for(const p of PROJECTS){ const c=CATALOGS[p.id]; if(c&&c.jobs) for(const s of c.jobs) items.push({label:`${p.name} · ${s.key}`,pid:p.id,key:s.key}); }
-  if(!items.length){ toast("没有可用的 catalog 任务做接管","bad"); return; }
+  const items=DRAFTS.map(d=>({label:`${d.name||"job"} · ${d.gpus}×${d.gpu_type||"gpu"}${d.project?" ["+d.project+"]":""}`,did:d.id}));
+  if(!items.length){ toast("没有任务模板可接管 — 先在 Templates 里建一个","bad"); return; }
   popMenu(anchor,items,async it=>{
-    if(!confirm(`make-before-break:在 ${j.nodes} 上用「${it.label}」接管 ${j.id}?\n新任务 RUNNING 后才取消旧的。`)) return;
-    try{ await api.post("/api/migrate",{mode:"handoff",src_job_id:j.job_id,target_node:j.nodes,project_id:it.pid,job_key:it.key});
+    if(!confirm(`make-before-break:在 ${j.nodes} 上用「${it.label}」接管 ${j.id}?\n新任务 RUNNING 后才取消旧的(模板的 nodelist 会被钉到该节点)。`)) return;
+    try{ await api.post("/api/migrate",{mode:"handoff",src_job_id:j.job_id,target_node:j.nodes,draft_id:it.did});
       toast(`已发起接管 → ${j.nodes}`,"good"); switchTab("migrations"); loadMigrations(); }
     catch(e){ toast("接管失败: "+e.message,"bad"); }
   });
@@ -685,12 +570,6 @@ function renderActivity(){
 }
 async function abortMig(id){ try{ await api.post(`/api/migrations/${id}/abort`,{}); toast("已中止迁移(保留原任务)","good"); loadMigrations(); } catch(e){ toast(e.message,"bad"); } }
 async function abortTransfer(id){ try{ await api.post(`/api/transfers/${id}/abort`,{}); toast("已中止传输","good"); loadMigrations(); } catch(e){ toast(e.message,"bad"); } }
-async function stageDep(it){
-  if(!confirm(`rsync 暂存(站内 Ceph)?\n源: ${it.src_host}:${it.path}\n目标: ${it.path}`)) return;
-  try{ await api.post("/api/stage",{src_host:it.src_host,src_path:it.path,dst_path:it.path});
-    toast("已开始 rsync 暂存","good"); switchTab("migrations"); loadMigrations(); }
-  catch(e){ toast("暂存失败: "+e.message,"bad"); }
-}
 
 // ===========================================================================
 // LOG VIEWER
@@ -730,12 +609,12 @@ function stopLogFollow(){ if(LOG.timer) clearInterval(LOG.timer); LOG.timer=null
 function closeLog(){ $("#logModal").classList.add("hidden"); stopLogFollow(); LOG.job=null; }
 
 // ===========================================================================
-// AD-HOC DRAFTS (secondary)
+// JOB TEMPLATES (the submit path)
 // ===========================================================================
 async function loadDrafts(){ DRAFTS=(await api.get("/api/drafts")).drafts; renderDrafts(); }
 function renderDrafts(){
   const body=$("#draftsBody"); $("#draftsCount").textContent=DRAFTS.length||"";
-  if(!DRAFTS.length){ body.innerHTML='<div class="empty">无临时任务</div>'; return; }
+  if(!DRAFTS.length){ body.innerHTML='<div class="empty">还没有任务模板。点 + New 写一个,提交后可重复使用。</div>'; return; }
   body.innerHTML="";
   for(const d of DRAFTS){
     const c=ce("div","card draft"+(d.kind==="holder"?" holder":""));
@@ -750,6 +629,7 @@ function renderDrafts(){
     c.appendChild(meta);
     const act=ce("div","card-actions");
     act.appendChild(btn("edit","sm ghost",()=>openEditor(d)));
+    act.appendChild(btn("clone","sm ghost",()=>cloneDraft(d)));
     act.appendChild(btn("submit","sm primary",()=>submitDraft(d)));
     act.appendChild(btn("delete","sm ghost danger",()=>delDraft(d)));
     c.appendChild(act); body.appendChild(c);
@@ -757,20 +637,42 @@ function renderDrafts(){
 }
 async function submitDraft(d){ if(!confirm(`提交「${d.name}」?`)) return; try{ const r=await api.post(`/api/drafts/${d.id}/submit`,{}); toast(`已提交 ✓ job ${r.job_id}`,"good"); loadDrafts(); refresh(); }catch(e){ toast("提交失败: "+e.message,"bad"); } }
 async function delDraft(d){ if(!confirm(`删除「${d.name}」?`)) return; await api.del(`/api/drafts/${d.id}`); loadDrafts(); }
+async function cloneDraft(d){
+  const {id,submitted_job_id,...rest}=d;
+  const copy=(await api.post("/api/drafts",{...rest,name:(d.name||"job")+"-copy"})).draft;
+  await loadDrafts(); openEditor(copy);
+}
 
-// draft editor (full sbatch fields)
-const FIELDS=[["name","Name","text"],["project","Project","text"],["gpus","GPUs","number"],["gpu_type","GPU type","gtype"],["nodes","Nodes","number"],
+// job template editor (full sbatch fields)
+const FIELDS=[["name","Name","text"],["project","Project","proj"],["gpus","GPUs","number"],["gpu_type","GPU type","gtype"],["nodes","Nodes","number"],
   ["cpus","CPUs","number"],["mem","Mem","text"],["time","Time","text"],["partition","Partition","text"],
-  ["qos","QOS","text"],["nodelist","Nodelist","text"],["output","Output","text",1],["script","Script","textarea",1]];
+  ["qos","QOS","qos"],["nodelist","Nodelist","text"],["workdir","Workdir","text",1],
+  ["output","Output","text",1],["script","Script","textarea",1]];
 let editing=null,prevTimer=null;
 function openEditor(d){ editing={...d}; $("#modalTitle").textContent=`Edit ${d.name||""}`; $("#modalErr").textContent="";
   const f=$("#draftForm"); f.innerHTML="";
   for(const [k,label,t,full] of FIELDS){ const w=ce("div","field"+(full?" full":"")); const lab=ce("label"); lab.textContent=label;
     const q=ce("span","q"); q.textContent="?"; q.dataset.help=k; lab.appendChild(q); w.appendChild(lab);
-    let inp; if(t==="textarea")inp=ce("textarea"); else if(t==="gtype"){inp=ce("input");inp.setAttribute("list","gtypes2");} else {inp=ce("input");inp.type=t==="number"?"number":"text";}
-    inp.id="f_"+k; inp.value=editing[k]??""; inp.addEventListener("input",editPreview); w.appendChild(inp); f.appendChild(w); }
+    let inp;
+    if(t==="textarea") inp=ce("textarea");
+    else if(t==="qos"){ inp=ce("select");
+      const cur=editing[k]||"", known=QOS.some(qq=>qq.name===cur);
+      inp.innerHTML='<option value="">(default)</option>'+
+        QOS.map(qq=>`<option value="${qq.name}">${qq.name} · prio ${qq.priority_pct}%${qq.can_preempt?" ⚡":""}</option>`).join("")+
+        (cur&&!known?`<option value="${esc(cur)}">${esc(cur)} (已保存)</option>`:""); }
+    else if(t==="gtype"){ inp=ce("input"); inp.setAttribute("list","gtypes2"); inp.placeholder="任意"; }
+    else if(t==="proj"){ inp=ce("input"); inp.setAttribute("list","projlist"); inp.placeholder="(未分组)"; }
+    else { inp=ce("input"); inp.type=t==="number"?"number":"text"; }
+    inp.id="f_"+k; inp.value=editing[k]??""; inp.addEventListener("input",editPreview); inp.addEventListener("change",editPreview);
+    w.appendChild(inp); f.appendChild(w); }
+  const note=ce("div","qosnote"); note.innerHTML="QOS 几乎决定起跑优先级(本集群 QOS 权重压倒 age/fairshare)。Project 决定提交后归入哪个文件夹。"; f.appendChild(note);
   let dl=ce("datalist"); dl.id="gtypes2"; dl.innerHTML=[...new Set(STATE.nodes.flatMap(n=>n.gpu_types))].map(t=>`<option value="${t}">`).join(""); f.appendChild(dl);
+  let pl=ce("datalist"); pl.id="projlist"; pl.innerHTML=(STATE.folders||[]).map(t=>`<option value="${esc(t)}">`).join(""); f.appendChild(pl);
   $("#modal").classList.remove("hidden"); editPreview();
+}
+function maxSched(){
+  $("#f_nodelist").value=""; $("#f_gpu_type").value=""; $("#f_partition").value=STATE.partitions.join(",");
+  editPreview(); toast("已切到最大可调度:任意卡型 + 多分区 + 不钉节点。建议把 Time 收紧以利 backfill。","good");
 }
 function collectDraft(){ const o={...editing}; for(const [k] of FIELDS){ const el=$("#f_"+k); if(el)o[k]=el.value; } o.gpus=+o.gpus||1; return o; }
 function editPreview(){ if(prevTimer)clearTimeout(prevTimer); $("#previewStatus").textContent="…";
@@ -779,6 +681,63 @@ async function saveEditor(submit){ const o=collectDraft();
   try{ let saved=o.id?(await api.post(`/api/drafts/${o.id}`,o)).draft:(await api.post("/api/drafts",o)).draft; await loadDrafts();
     $("#modal").classList.add("hidden"); if(submit) await submitDraft(saved); else toast("已保存","good"); }
   catch(e){ $("#modalErr").textContent=e.message; } }
+
+// ===========================================================================
+// USAGE (per-project GPU accounting from sacct)
+// ===========================================================================
+const GT_COLOR=["#4f9cf9","#2ecc71","#f5a623","#7c5cff","#e0556b","#2ec4c4","#9aa4b6"];
+let USAGE=null, USAGE_DAYS=+(localStorage.gpuvizUsageDays||30), USAGE_OPEN=new Set();
+function gtColor(t,types){ const i=types.indexOf(t); return GT_COLOR[(i<0?0:i)%GT_COLOR.length]; }
+function fmtH(h){ return h>=1000?(h/1000).toFixed(1)+"k":(h>=10?h.toFixed(0):h.toFixed(1)); }
+async function loadUsage(){
+  const body=$("#usageBody"); if(!USAGE) body.innerHTML='<div class="empty">统计中…(sacct 查询)</div>';
+  try{ USAGE=await api.get(`/api/usage?days=${USAGE_DAYS}`); }
+  catch(e){ body.innerHTML=`<div class="empty">读取失败: ${esc(e.message)}</div>`; return; }
+  renderUsage();
+}
+function renderUsage(){
+  const u=USAGE; if(!u) return;
+  const types=Object.keys(u.total.by_type);
+  $("#usageSummary").innerHTML=
+    `<b>${fmtH(u.total.gpu_hours)}</b> GPU·h · ${u.total.jobs} 个任务 · 近 ${u.days} 天` +
+    types.map(t=>` <i class="lg" style="background:${gtColor(t,types)}"></i>${t} ${fmtH(u.total.by_type[t])}`).join("");
+  const max=Math.max(1,...u.folders.map(f=>f.gpu_hours));
+  const body=$("#usageBody"); body.innerHTML="";
+  if(!u.folders.length){ body.innerHTML='<div class="empty">这段时间没有任务记录</div>'; return; }
+  for(const f of u.folders){
+    const row=ce("div","urow"+(USAGE_OPEN.has(f.folder)?" open":""));
+    const head=ce("div","urow-head");
+    const segs=Object.entries(f.by_type).map(([t,v])=>
+      `<span class="ps" style="width:${(v/f.gpu_hours*100).toFixed(1)}%;background:${gtColor(t,types)}" title="${t}: ${fmtH(v)} GPU·h"></span>`).join("");
+    head.innerHTML=
+      `<span class="ufold">${esc(f.folder)}</span>`+
+      `<span class="ugh"><b>${fmtH(f.gpu_hours)}</b> GPU·h</span>`+
+      `<span class="ushare">${(f.gpu_hours/Math.max(u.total.gpu_hours,1e-9)*100).toFixed(0)}%</span>`+
+      `<div class="pbar2" style="width:${Math.max(3,f.gpu_hours/max*100).toFixed(1)}%">${segs}</div>`;
+    head.onclick=()=>{ USAGE_OPEN.has(f.folder)?USAGE_OPEN.delete(f.folder):USAGE_OPEN.add(f.folder); renderUsage(); };
+    row.appendChild(head);
+    const sub=ce("div","urow-sub");
+    const states=Object.entries(f.by_state).sort((a,b)=>b[1]-a[1])
+      .map(([s,n])=>`<span class="ust ${s}">${s} ${n}</span>`).join("");
+    sub.innerHTML=`<span>${f.jobs} 个任务${f.running?` · <b class="run">${f.running} 运行中</b>`:""}</span>`+
+      `<span>${fmtH(f.wall_hours)} 机时(wall)· ${fmtH(f.cpu_hours)} CPU·h</span>`+
+      (f.last?`<span>最近 ${fmtAge(Math.floor(Date.now()/1000-f.last))}</span>`:"");
+    row.appendChild(sub);
+    if(USAGE_OPEN.has(f.folder)){
+      const det=ce("div","urow-det");
+      det.innerHTML=`<div class="ustates">${states}</div>`+
+        f.top_names.map(n=>`<div class="uname"><span>${esc(n.name)}</span><span class="muted">×${n.runs}</span><b>${fmtH(n.gpu_hours)}</b></div>`).join("");
+      row.appendChild(det);
+    }
+    body.appendChild(row);
+  }
+  const spark=$("#usageSpark"); const d=u.daily; const dmax=Math.max(1,...d);
+  spark.innerHTML=d.map((v,i)=>{
+    const day=new Date((u.day0+i*86400)*1000).toLocaleDateString("sv-SE");
+    return `<i style="height:${Math.max(2,v/dmax*100)}%" title="${day}: ${fmtH(v)} GPU·h"></i>`;
+  }).join("");
+  $("#usageSparkNote").textContent=`每日 GPU·h(峰值 ${fmtH(dmax)})`;
+}
 
 // ===========================================================================
 // HELP TIPS
@@ -856,8 +815,9 @@ let pollTimer=null;
 function startPolling(){ stopPolling(); const ms=+$("#refreshSel").value; if(ms>0) pollTimer=setInterval(refresh,ms); }
 function stopPolling(){ if(pollTimer) clearInterval(pollTimer); pollTimer=null; }
 function switchTab(name){ document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===name));
-  for(const n of ["projects","jobs","queue","migrations","drafts","finished"]) $("#tab-"+n).classList.toggle("hidden",n!==name);
+  for(const n of ["jobs","queue","usage","migrations","drafts","finished"]) $("#tab-"+n).classList.toggle("hidden",n!==name);
   if(name==="queue") loadQueue();
+  if(name==="usage") loadUsage();
   if(name==="finished") renderFinished(); }
 
 function wire(){
@@ -869,22 +829,28 @@ function wire(){
   $("#queueMine").onchange=e=>{QFILT.mine=e.target.checked;renderQueue();};
   $("#queueType").onchange=e=>{QFILT.type=e.target.value;renderQueue();};
   document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>switchTab(t.dataset.tab));
-  $("#addProjBtn").onclick=async()=>{ const p=$("#projPath").value.trim(); if(!p) return; try{ await api.post("/api/projects",{path:p}); $("#projPath").value=""; loadProjects(); }catch(e){ toast(e.message,"bad"); } };
-  $("#projPath").addEventListener("keydown",e=>{ if(e.key==="Enter") $("#addProjBtn").click(); });
   $("#addFolderBtn").onclick=async()=>{ const n=$("#newFolderName").value.trim(); if(!n) return;
     try{ await api.post("/api/groups",{name:n}); $("#newFolderName").value=""; refresh(); }catch(e){ toast(e.message,"bad"); } };
   $("#newFolderName").addEventListener("keydown",e=>{ if(e.key==="Enter") $("#addFolderBtn").click(); });
   $("#clearFinBtn").onclick=()=>{ for(const k of FINISHED.keys()) FIN_GONE.add(k); FINISHED.clear(); renderFinished(); };
   $("#clearMigBtn").onclick=async()=>{ await Promise.all([api.post("/api/migrations/clear",{}),api.post("/api/transfers/clear",{}),api.post("/api/monitors/clear",{})]); loadMigrations(); };
-  // submit modal
-  $("#subClose").onclick=$("#subCancel").onclick=()=>$("#subModal").classList.add("hidden");
-  $("#subSubmit").onclick=doSubmit; $("#maxSchedBtn").onclick=maxSched;
-  $("#subModal").addEventListener("click",e=>{ if(e.target.id==="subModal") $("#subModal").classList.add("hidden"); });
-  // draft modal
+  $("#stageBtn").onclick=()=>{
+    const host=(prompt("源 login node 主机名(能 ssh 到的):")||"").trim(); if(!host) return;
+    const src=(prompt("源路径(绝对):")||"").trim(); if(!src) return;
+    const dst=(prompt("目标路径(默认同源路径):",src)||src).trim();
+    api.post("/api/stage",{src_host:host,src_path:src,dst_path:dst})
+      .then(()=>{ toast("已开始 rsync 暂存","good"); loadMigrations(); })
+      .catch(e=>toast("暂存失败: "+e.message,"bad"));
+  };
+  // usage
+  $("#usageDays").onchange=e=>{ USAGE_DAYS=+e.target.value; localStorage.gpuvizUsageDays=USAGE_DAYS; USAGE=null; loadUsage(); };
+  $("#usageRefresh").onclick=()=>{ USAGE=null; loadUsage(); };
+  // template editor modal
   $("#newDraftBtn").onclick=async()=>{ const d=(await api.post("/api/drafts",{})).draft; await loadDrafts(); openEditor(d); };
   $("#newHolderBtn").onclick=async()=>{ const d=(await api.post("/api/drafts",{kind:"holder"})).draft; await loadDrafts(); openEditor(d); };
   $("#modalClose").onclick=$("#modalCancel").onclick=()=>$("#modal").classList.add("hidden");
   $("#modalSave").onclick=()=>saveEditor(false); $("#modalSubmit").onclick=()=>saveEditor(true);
+  $("#maxSchedBtn").onclick=maxSched;
   // node zoom-in modal
   $("#nodeClose").onclick=closeNode;
   $("#nodeModal").addEventListener("click",e=>{ if(e.target.id==="nodeModal") closeNode(); });
@@ -925,7 +891,8 @@ async function init(){
   const allTypes=[...new Set(STATE.nodes.flatMap(n=>n.gpu_types))].sort();
   $("#typeFilter").innerHTML='<option value="">all types</option>'+allTypes.map(t=>`<option>${t}</option>`).join("");
   $("#queueType").innerHTML='<option value="">all GPU</option>'+allTypes.map(t=>`<option>${t}</option>`).join("");
-  await loadProjects(); await loadDrafts();
+  $("#usageDays").value=String(USAGE_DAYS);
+  await loadDrafts();
   startPolling();
   setInterval(tickFinished,1000);   // countdown + 3-min auto-expiry, independent of polling
   setInterval(renderJobInfo,1000);  // keep 已运行/剩余时间 ticking while the info modal is open

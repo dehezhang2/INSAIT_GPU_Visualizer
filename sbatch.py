@@ -20,6 +20,11 @@ FIELD_HELP: dict[str, dict] = {
         "what": "提交后任务归入 Jobs 页的哪个 project 文件夹。留空=未分组,之后也可拖动归类。",
         "example": "conesplat",
     },
+    "workdir": {
+        "flag": "--chdir / -D",
+        "what": "任务的工作目录(相对路径的 output / 脚本都以它为基准)。留空=家目录。",
+        "example": "/home/me/projects/myrepo",
+    },
     "gpus": {
         "flag": "--gres=gpu:N",
         "what": "每个节点要几张 GPU。配合 gpu_type 会变成 --gres=gpu:<type>:N。",
@@ -212,6 +217,7 @@ def render(draft: dict) -> str:
     lines = ["#!/bin/bash"]
     out = [
         _line("--job-name", d.get("name")),
+        _line("--chdir", d.get("workdir")),
         f"#SBATCH --gres={gres}",
         _line("--nodes", d.get("nodes")),
         _line("--cpus-per-task", d.get("cpus")),

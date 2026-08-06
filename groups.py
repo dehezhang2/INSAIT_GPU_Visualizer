@@ -56,14 +56,14 @@ def snapshot() -> dict:
             "by_name": d["by_name"]}
 
 
-def resolve(job_id, name, origin_project, snap) -> str | None:
+def resolve(job_id, name, snap) -> str | None:
     """Folder for one job, given a snapshot(). None = ungrouped."""
     jid = str(job_id).split("_")[0]
     if jid in snap["by_id"]:
-        return snap["by_id"][jid] or None  # "" tombstone wins over fallbacks
+        return snap["by_id"][jid] or None  # "" tombstone wins over the name rule
     if name and name in snap["by_name"]:
         return snap["by_name"][name]
-    return origin_project or None
+    return None
 
 
 def create(name: str) -> str:

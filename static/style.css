@@ -168,6 +168,28 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 6px var(--side-w,380px);ga
 .empty{color:var(--muted);text-align:center;padding:24px;font-size:12px}
 .empty.sm{padding:6px;font-size:11px;text-align:left}
 
+/* usage (per-project accounting) */
+.hint.sm{font-size:10px;margin:2px 0 10px}
+.uspark{display:flex;align-items:flex-end;gap:1px;height:44px;margin-top:8px;
+  background:#0b0e13;border:1px solid var(--line);border-radius:6px;padding:4px}
+.uspark i{flex:1;min-width:1px;background:linear-gradient(180deg,var(--accent),#2b5f9e);border-radius:1px}
+.urow{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:8px}
+.urow-head{display:flex;align-items:center;gap:10px;cursor:pointer}
+.urow-head .ufold{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:0 1 auto}
+.urow-head .ugh{font-size:12px;color:var(--muted);white-space:nowrap}
+.urow-head .ugh b{color:var(--text);font-size:13px}
+.urow-head .ushare{font-size:11px;color:var(--muted);min-width:30px;text-align:right}
+.urow-head .pbar2{margin-left:auto;max-width:45%}
+.urow-sub{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-top:6px}
+.urow-sub b.run{color:var(--run)}
+.urow-det{margin-top:8px;padding-top:8px;border-top:1px solid var(--line)}
+.ustates{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}
+.ust{font-size:10px;padding:1px 6px;border-radius:8px;background:var(--panel2);color:var(--muted)}
+.ust.COMPLETED{color:var(--good)} .ust.FAILED,.ust.OUT_OF_MEMORY{color:var(--bad)}
+.ust.RUNNING{color:var(--run)} .ust.TIMEOUT,.ust.PREEMPTED{color:var(--warn)}
+.uname{display:flex;gap:8px;align-items:baseline;font-size:11px;padding:2px 0}
+.uname span:first-child{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
 /* project folders (Jobs tab) */
 .folder{margin-bottom:12px}
 .folder-head{display:flex;align-items:center;gap:8px;padding:5px 8px;background:var(--panel);

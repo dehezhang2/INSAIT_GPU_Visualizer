@@ -1,9 +1,9 @@
 # GPU Visualizer
 
-A zero-dependency Slurm WebUI that **separates job definition from job
-management**: you declare jobs in each project repo's `gpuviz.toml`, register the
-repos here, and then submit / monitor / migrate / read logs for all of them from
-one page — alongside a live map of free GPUs across the cluster.
+A zero-dependency Slurm WebUI: submit / monitor / migrate / read logs for your
+jobs, organize them into **project folders** you drag jobs into, see **how many
+GPU-hours each project burned** — all next to a live map of free GPUs across the
+cluster.
 
 Pure Python **stdlib** backend + vanilla JS frontend. No pip installs, no
 node/npm, no build step.
@@ -27,16 +27,16 @@ ssh -L 8770:localhost:8770 <login-node>      # e.g. sof1-h200-0
 ## Concept
 
 ```
-  repo A ─┐   each repo's gpuviz.toml          WebUI (here)         Slurm
-  repo B ─┼─► declares its jobs (resources,  ─►  · free-GPU map  ─►  sbatch
-  repo C ─┘   command, data deps)                · submit + overrides  scancel
-                                                 · make-before-break   scontrol
-                                                 · logs / migrations
+   Templates          Jobs (folders)         Usage            Slurm
+   reusable      ─►   drag a job into   ─►   GPU-hours   ◄──  sbatch / scancel
+   sbatch specs       its project            per project      scontrol / sacct
 ```
 
-Define jobs **once, in the repo** (version-controlled, next to the code). Manage
-them **here**. GUI tweaks at submit time don't rewrite your `gpuviz.toml`; the
-exact sbatch that ran is snapshotted into `<repo>/.gpuviz/submissions/`.
+Everything is organized around a **project label** you control from the GUI, not
+around config files in your repos. Submit from a reusable template (which can
+carry a project), or drag any job — however it was submitted, including from
+your own shell — into a folder. Labels are pure metadata: nothing about the
+Slurm job changes, and the same labels drive the per-project usage accounting.
 
 ## Features
 
@@ -44,28 +44,35 @@ exact sbatch that ran is snapshotted into `<repo>/.gpuviz/submissions/`.
 per GPU, green = free. Nodes you can submit to are highlighted, others dimmed 🔒.
 Header shows free-by-type. Filters + adjustable refresh interval.
 
-**Projects** — register a repo → its `gpuviz.toml` jobs appear as blocks (sized by
-GPU count). Each shows its **data-dependency status** (`needs`): ✓ present /
-⚠ too small / ✗ missing / ⇄ on another site. *Preview / submit* opens an override
-form (live sbatch preview, `?` explains every flag, **QOS picker shows priority**,
-**⚡ max-schedulability** button clears nodelist + any-GPU + multi-partition).
+**Jobs — project folders** — your running/pending jobs, grouped into folders you
+create in the GUI: drag a job card onto a folder header to file it, drag onto
+未分组 to unfile. Filing is **sticky by job name**, so the next run of the same
+job lands in the same folder without touching it. Jobs submitted from a template
+carrying a `project` are filed on submit. Folders are labels only — nothing about
+the Slurm job changes, and jobs you submitted from your own shell can be filed
+just the same. Per job: **logs** (drill-in stdout/stderr viewer with live tail),
+**info**, hold/release, edit (`scontrol update`), cancel. No folders created ⇒
+the tab stays a flat list.
 
-**Jobs** — your running/pending jobs, grouped into **project folders** you
-create in the GUI: drag a job card onto a folder header to file it (same-named
-jobs auto-follow on resubmit), drag onto 未分组 to unfile. Jobs submitted from
-a registered repo land in a folder named after that repo automatically; ad-hoc
-drafts have a `project` field (or drag the draft onto a folder). Folders are
-labels only — nothing about the Slurm job changes. Per job: **logs** (drill-in
-stdout/stderr viewer with live tail), hold/release, edit (`scontrol update`),
-cancel. No folders created ⇒ the tab stays a flat list.
+**Usage** — GPU-hours per project over the last 7 / 30 / 90 / 180 days, read from
+`sacct` and attributed with the same folder rules. Stacked bars break each
+project down by GPU type, a daily sparkline shows the trend, and expanding a row
+lists the job names that burned the time (runs + GPU-h each) plus the
+COMPLETED/FAILED/… mix. A job that straddles the window edge only counts the
+part inside it, and long jobs are spread across the days they actually occupied.
+
+**Templates** — reusable sbatch specs (full editor with live preview, `?` on
+every flag, **QOS picker showing priority**, **⚡ max-schedulability** button that
+clears nodelist + any-GPU + multi-partition). `clone` copies one to tweak,
+`Project` files its submissions automatically, `+ Holder` makes a GPU-warming
+placeholder. Drag a template onto a free node to pin `--nodelist`, or onto a
+project folder to set its project.
 
 **Make-before-break migration** — drag a running job onto a free node: a clone is
 submitted there and the original is cancelled **only once the clone is RUNNING**
 (no allocation gap). A background thread watches it; abort anytime (keeps the
 original). `swap→` on a running job does the same but hands the node to a chosen
-catalog job (e.g. holder → real eval).
-
-**Ad-hoc** — one-off jobs not tied to a repo (full sbatch editor).
+**template** (e.g. holder → real eval); the template itself is not rewritten.
 
 **Finished** — a job that reaches a terminal state leaves **Jobs** and lands here
 with its real outcome from `sacct` (COMPLETED / FAILED / CANCELLED / TIMEOUT +
@@ -95,40 +102,32 @@ unconstrained job (pinning defeats backfill, risks double-starts). The right
 "queue everywhere" is one job: no nodelist, any GPU type, multi-partition,
 **tight `--time`** — that's the ⚡ max-schedulability button.
 
-## gpuviz.toml
-
-See [`examples/gpuviz.toml`](examples/gpuviz.toml). Supports `[defaults]` +
-`[[job]]` with inline `command`, reused `script_file`, `kind="holder"`, and data
-`needs` (with `min_gb` / `site`).
-
 ## Files
 
 | file | role |
 |------|------|
 | `server.py`    | stdlib HTTP server + JSON API |
 | `auth.py`      | password hash + sessions (`~/.gpuviz/auth.json`) |
-| `groups.py`    | project folders for jobs (`~/.gpuviz/groups.json`) |
 | `slurm.py`     | nodes / jobs / qos / partitions / actions |
-| `catalog.py`   | read a repo's `gpuviz.toml` |
-| `projects.py`  | repo registry (`~/.gpuviz/projects.json`) |
-| `submitter.py` | render + snapshot + submit + provenance index |
-| `migrate.py`   | make-before-break background engine |
-| `deps.py`      | data-dependency presence checks |
-| `logs.py`      | resolve + tail stdout/stderr |
+| `groups.py`    | project folders for jobs (`~/.gpuviz/groups.json`) |
+| `usage.py`     | per-project GPU-hour accounting from `sacct` |
+| `drafts.py`    | reusable job templates (`~/.gpuviz/drafts.json`) |
 | `sbatch.py`    | render spec → sbatch; field help; holder template |
-| `drafts.py`    | ad-hoc (non-repo) jobs |
-| `static/`      | `index.html`, `style.css`, `app.js` (no build) |
+| `migrate.py`   | make-before-break background engine |
+| `transfer.py`  | rsync staging between login nodes |
+| `monitors.py`  | external progress monitors (posted by training scripts) |
+| `logs.py`      | resolve + tail stdout/stderr |
+| `static/`      | `index.html`, `login.html`, `style.css`, `app.js` (no build) |
 
-## Not done yet
+## Notes
 
-- **Cross-site data transfer** (feature 7): deps already *detect* `site=` data
-  that lives on another cluster (sof1/msp3/hala/gcp don't share `/scratch`, and
-  `/group` is Ceph) and flag ⇄ "stage first" — but the actual transfer + progress
-  bar isn't built. Needs the storage topology confirmed (is `/group` the same
-  Ceph everywhere?) and a transfer mechanism (rsync between login nodes? object
-  store?).
-- Live submit/migrate were left **untested against real jobs** by design; do a
-  guarded end-to-end run with a tiny holder job first.
+The old **`gpuviz.toml` repo-catalog** mechanism (register a repo → read its
+declared jobs → submit with overrides) was removed: in practice it went unused
+(the submission index stayed empty while the repo registry went stale), and its
+job-organizing role is now done better by GUI folders, which also cover jobs
+submitted outside this tool. Templates replaced it as the submit path. To bring
+it back, see the commit that deleted `catalog.py` / `projects.py` /
+`submitter.py` / `deps.py`.
 
-State lives in `~/.gpuviz/` (projects, drafts, submission index). Migrations are
-in-memory (lost on server restart).
+State lives in `~/.gpuviz/` (credentials, folders, templates). Migrations and
+sessions are in memory — a server restart drops both.

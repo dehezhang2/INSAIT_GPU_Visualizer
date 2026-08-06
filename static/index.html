@@ -44,30 +44,38 @@
 
   <aside class="col side">
     <div class="tabs">
-      <button class="tab active" data-tab="projects">Projects <span id="projCount" class="pill"></span></button>
-      <button class="tab" data-tab="jobs">Jobs <span id="jobsCount" class="pill"></span></button>
+      <button class="tab active" data-tab="jobs">Jobs <span id="jobsCount" class="pill"></span></button>
       <button class="tab" data-tab="queue">Queue <span id="queueCount" class="pill"></span></button>
+      <button class="tab" data-tab="usage">Usage</button>
       <button class="tab" data-tab="migrations">Migrations <span id="migCount" class="pill"></span></button>
-      <button class="tab" data-tab="drafts">Ad-hoc <span id="draftsCount" class="pill"></span></button>
+      <button class="tab" data-tab="drafts">Templates <span id="draftsCount" class="pill"></span></button>
       <button class="tab" data-tab="finished">Finished <span id="finCount" class="pill"></span></button>
     </div>
 
-    <div id="tab-projects" class="tab-body">
-      <div class="addrow">
-        <input id="projPath" placeholder="项目 repo 绝对路径 (含 gpuviz.toml)">
-        <button class="btn" id="addProjBtn">+ Add</button>
-      </div>
-      <p class="hint">在每个 repo 根目录放 <code>gpuviz.toml</code> 声明任务;这里统一提交/管理。提交时可临时改参数,真实 sbatch 会快照进 repo 的 <code>.gpuviz/submissions/</code>。</p>
-      <div id="projectsBody"></div>
-    </div>
-
-    <div id="tab-jobs" class="tab-body hidden">
+    <div id="tab-jobs" class="tab-body">
       <div class="addrow">
         <input id="newFolderName" placeholder="新建 project 文件夹">
         <button class="btn" id="addFolderBtn">+ Folder</button>
       </div>
-      <p class="hint">任务按 project 分组;拖任务卡到分组标题即可归类(同名任务以后自动归入同组),拖到「未分组」取消。Ad-hoc 草稿也可以拖过来设置 project。</p>
+      <p class="hint">任务按 project 分组;拖任务卡到分组标题即可归类(同名任务以后自动归入同组),拖到「未分组」取消。Templates 里的模板也可以拖过来设置 project。</p>
       <div id="jobsBody">loading…</div>
+    </div>
+
+    <div id="tab-usage" class="tab-body hidden">
+      <div class="addrow">
+        <select id="usageDays">
+          <option value="7">近 7 天</option>
+          <option value="30" selected>近 30 天</option>
+          <option value="90">近 90 天</option>
+          <option value="180">近 180 天</option>
+        </select>
+        <button class="btn ghost sm" id="usageRefresh">↻ 重算</button>
+      </div>
+      <div id="usageSummary" class="hint"></div>
+      <div id="usageSpark" class="uspark"></div>
+      <div id="usageSparkNote" class="hint sm"></div>
+      <div id="usageBody"></div>
+      <p class="hint">来自 <code>sacct</code>:GPU·h = 卡数 × 占用时长(跨窗口的任务只算窗口内那段),按 Jobs 页的 project 归属汇总。点一行展开任务名明细。</p>
     </div>
 
     <div id="tab-queue" class="tab-body hidden">
@@ -82,6 +90,7 @@
 
     <div id="tab-migrations" class="tab-body hidden">
       <div class="addrow"><div class="hint" style="flex:1">make-before-break:新任务 RUNNING 后才取消旧的。把 Jobs 里的任务拖到左边空闲节点即可发起。</div>
+        <button class="btn ghost sm" id="stageBtn" title="从另一个 login node rsync 数据过来">+ stage 数据</button>
         <button class="btn ghost sm" id="clearMigBtn">clear done</button></div>
       <div id="migrationsBody"></div>
     </div>
@@ -91,7 +100,7 @@
         <button class="btn" id="newDraftBtn">+ New</button>
         <button class="btn ghost" id="newHolderBtn" title="占卡空转,之后可替换成 eval">+ Holder</button>
       </div>
-      <p class="hint">不挂靠 repo 的一次性任务。拖到左边空闲节点可锁定 --nodelist。</p>
+      <p class="hint">可重复提交的任务模板(完整 sbatch 编辑器)。<code>Project</code> 决定提交后归入哪个文件夹;<code>clone</code> 复制一份改参数;拖到左边空闲节点可锁定 <code>--nodelist</code>;运行中任务的 <code>swap→</code> 也从这里选接管任务。</p>
       <div id="draftsBody"></div>
     </div>
 
@@ -105,28 +114,7 @@
   </aside>
 </main>
 
-<!-- catalog submit / override modal -->
-<div id="subModal" class="modal hidden">
-  <div class="modal-card">
-    <div class="modal-head"><h3 id="subTitle">Submit job</h3>
-      <button class="btn ghost" id="subClose">✕</button></div>
-    <div class="modal-body">
-      <form id="subForm" class="form"></form>
-      <div class="preview">
-        <div class="preview-head">sbatch 预览 <span class="muted" id="subPrevStatus"></span></div>
-        <pre id="subPrev" class="preview-pre"></pre>
-      </div>
-    </div>
-    <div class="modal-foot">
-      <button class="btn ghost sm" id="maxSchedBtn" title="清 nodelist+任意卡型+多分区,最快被调度">⚡ max schedulability</button>
-      <span id="subErr" class="err"></span><div class="spacer"></div>
-      <button class="btn ghost" id="subCancel">Cancel</button>
-      <button class="btn primary" id="subSubmit">Submit to Slurm</button>
-    </div>
-  </div>
-</div>
-
-<!-- ad-hoc draft editor modal -->
+<!-- job template editor modal -->
 <div id="modal" class="modal hidden">
   <div class="modal-card">
     <div class="modal-head"><h3 id="modalTitle">Edit job</h3>
@@ -138,7 +126,9 @@
         <pre id="previewPre" class="preview-pre"></pre>
       </div>
     </div>
-    <div class="modal-foot"><span id="modalErr" class="err"></span><div class="spacer"></div>
+    <div class="modal-foot">
+      <button class="btn ghost sm" id="maxSchedBtn" title="清 nodelist+任意卡型+多分区,最快被调度">⚡ max schedulability</button>
+      <span id="modalErr" class="err"></span><div class="spacer"></div>
       <button class="btn ghost" id="modalCancel">Cancel</button>
       <button class="btn" id="modalSave">Save</button>
       <button class="btn primary" id="modalSubmit">Save &amp; Submit</button></div>
