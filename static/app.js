@@ -6,7 +6,10 @@ const api = {
     body:JSON.stringify(b||{})}); if(!r.ok) throw await err(r); return r.json(); },
   async del(u){ const r=await fetch(u,{method:"DELETE"}); if(!r.ok) throw await err(r); return r.json(); },
 };
-async function err(r){ try{const j=await r.json(); return new Error(j.error||r.statusText);}catch(_){return new Error(r.statusText);} }
+async function err(r){
+  if(r.status===401){ location.href="/login"; return new Error("未登录"); }
+  try{const j=await r.json(); return new Error(j.error||r.statusText);}catch(_){return new Error(r.statusText);}
+}
 const $=s=>document.querySelector(s);
 const ce=(t,c)=>{const e=document.createElement(t); if(c)e.className=c; return e;};
 const esc=s=>(s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -847,6 +850,8 @@ function wire(){
   $("#logClose").onclick=closeLog;
   document.querySelectorAll(".ltab").forEach(t=>t.onclick=()=>{ LOG.stream=t.dataset.stream; document.querySelectorAll(".ltab").forEach(x=>x.classList.toggle("active",x===t)); renderLog(); });
   $("#logModal").addEventListener("click",e=>{ if(e.target.id==="logModal") closeLog(); });
+  // logout
+  $("#logoutBtn").onclick=async()=>{ try{ await api.post("/api/logout",{}); }catch(_){} location.href="/login"; };
 }
 
 function setupSplitter(){

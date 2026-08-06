@@ -20,6 +20,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import auth
 import catalog
 import deps
 import drafts
@@ -51,14 +52,22 @@ class Handler(BaseHTTPRequestHandler):
             return [Handler._sane(x) for x in o]
         return o
 
-    def _json(self, obj, status=200):
+    def _json(self, obj, status=200, headers=()):
         body = json.dumps(self._sane(obj)).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for k, v in headers:
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
+
+    def _redirect(self, loc):
+        self.send_response(302)
+        self.send_header("Location", loc)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _file(self, path):
         if not os.path.isfile(path):
@@ -99,10 +108,45 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             return self._json({"error": repr(e)}, 500)
 
+    # -- auth ---------------------------------------------------------------
+    def _auth_user(self):
+        if not auth.enabled():
+            return slurm.USER
+        return auth.session_user(auth.token_from(self.headers.get("Cookie")))
+
+    def _guard(self, path):
+        """True → request may proceed. Otherwise responds 401/302 itself."""
+        if self._auth_user():
+            return True
+        if path.startswith("/api/"):
+            self._json({"error": "authentication required"}, 401)
+        else:
+            self._redirect("/login")
+        return False
+
+    def _login(self, body):
+        user = (body.get("username") or "").strip()
+        if not auth.verify(user, body.get("password") or ""):
+            return self._json({"error": "用户名或密码错误"}, 401)
+        tok = auth.new_session(user)
+        return self._json({"ok": True},
+                          headers=[("Set-Cookie", auth.cookie(tok))])
+
+    def _logout(self):
+        auth.drop_session(auth.token_from(self.headers.get("Cookie")))
+        return self._json({"ok": True},
+                          headers=[("Set-Cookie", auth.cookie("", expire=True))])
+
     # -- GET --------------------------------------------------------------
     def do_GET(self):
         u = urlparse(self.path)
         path, q = u.path, parse_qs(u.query)
+        if path == "/login":
+            if self._auth_user():          # already logged in (or auth off)
+                return self._redirect("/")
+            return self._file(os.path.join(STATIC, "login.html"))
+        if not self._guard(path):
+            return
         if path in ("/", "/index.html"):
             return self._file(os.path.join(STATIC, "index.html"))
         if path.startswith("/static/"):
@@ -207,6 +251,8 @@ class Handler(BaseHTTPRequestHandler):
     # -- DELETE -----------------------------------------------------------
     def do_DELETE(self):
         u = urlparse(self.path)
+        if not self._guard(u.path):
+            return
         return self._wrap(lambda: self._delete(u.path, parse_qs(u.query)))
 
     def _delete(self, path, q):
@@ -232,6 +278,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         body = self._body()
+        if path == "/api/login":
+            return self._wrap(lambda: self._login(body))
+        if not self._guard(path):
+            return
+        if path == "/api/logout":
+            return self._wrap(self._logout)
         return self._wrap(lambda: self._post(path, body))
 
     def do_PUT(self):
@@ -399,9 +451,24 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8770)
     ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--set-password", action="store_true",
+                    help="create/update login credentials and exit")
+    ap.add_argument("--no-auth", action="store_true",
+                    help="run WITHOUT login (anyone on this host can act as you)")
     args = ap.parse_args()
+    if args.set_password:
+        auth.set_password()
+        return
+    if args.no_auth:
+        auth.disable()
+    elif not auth.configured():
+        raise SystemExit(
+            "no credentials yet — run `python3 server.py --set-password` first\n"
+            "(or start with --no-auth, NOT recommended on a shared login node)")
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"gpu-visualizer — user '{slurm.USER}' @ site '{slurm.current_site()}'")
+    print("  auth:   " + ("OFF (--no-auth)" if args.no_auth
+                          else f"login required ({auth.AUTH_FILE})"))
     print(f"  local:  http://{args.host}:{args.port}")
     print(f"  tunnel: ssh -L {args.port}:localhost:{args.port} <this-login-node>")
     try:

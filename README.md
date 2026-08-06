@@ -13,6 +13,7 @@ node/npm, no build step.
 On the Slurm **login node**:
 
 ```bash
+python3 server.py --set-password   # first time only: create login credentials
 python3 server.py --port 8770
 ```
 
@@ -68,6 +69,18 @@ job, `swap→` is disabled — you cannot hand off a node that is already releas
 Each card self-clears 3 minutes after the job ended (`clear` / `dismiss` to drop
 it sooner); cleared cards never come back.
 
+## Authentication
+
+Binding to `127.0.0.1` does **not** protect a shared login node: every user on
+the same host can reach localhost, and the API runs Slurm commands as whoever
+started the server. So the UI requires a login (username + password).
+
+- `python3 server.py --set-password` — create/update credentials
+  (PBKDF2-SHA256, stored 0600 in `~/.gpuviz/auth.json`).
+- Sessions are HttpOnly cookies backed by in-memory tokens (7-day sliding
+  expiry; a server restart logs everyone out).
+- `--no-auth` skips the login — only for single-user machines.
+
 ## Why QOS matters on this cluster (and "spread across nodes" doesn't)
 
 Scheduling is `sched/backfill` with `PriorityWeightQOS` ≈ 1e9, dwarfing age /
@@ -88,6 +101,7 @@ See [`examples/gpuviz.toml`](examples/gpuviz.toml). Supports `[defaults]` +
 | file | role |
 |------|------|
 | `server.py`    | stdlib HTTP server + JSON API |
+| `auth.py`      | password hash + sessions (`~/.gpuviz/auth.json`) |
 | `slurm.py`     | nodes / jobs / qos / partitions / actions |
 | `catalog.py`   | read a repo's `gpuviz.toml` |
 | `projects.py`  | repo registry (`~/.gpuviz/projects.json`) |
