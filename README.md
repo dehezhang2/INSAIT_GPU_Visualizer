@@ -50,9 +50,14 @@ GPU count). Each shows its **data-dependency status** (`needs`): ✓ present /
 form (live sbatch preview, `?` explains every flag, **QOS picker shows priority**,
 **⚡ max-schedulability** button clears nodelist + any-GPU + multi-partition).
 
-**Jobs** — your running/pending jobs. Per job: **logs** (drill-in stdout/stderr
-viewer with live tail), hold/release, edit (`scontrol update`), cancel. Jobs
-submitted from a repo are tagged with their origin.
+**Jobs** — your running/pending jobs, grouped into **project folders** you
+create in the GUI: drag a job card onto a folder header to file it (same-named
+jobs auto-follow on resubmit), drag onto 未分组 to unfile. Jobs submitted from
+a registered repo land in a folder named after that repo automatically; ad-hoc
+drafts have a `project` field (or drag the draft onto a folder). Folders are
+labels only — nothing about the Slurm job changes. Per job: **logs** (drill-in
+stdout/stderr viewer with live tail), hold/release, edit (`scontrol update`),
+cancel. No folders created ⇒ the tab stays a flat list.
 
 **Make-before-break migration** — drag a running job onto a free node: a clone is
 submitted there and the original is cancelled **only once the clone is RUNNING**
@@ -102,6 +107,7 @@ See [`examples/gpuviz.toml`](examples/gpuviz.toml). Supports `[defaults]` +
 |------|------|
 | `server.py`    | stdlib HTTP server + JSON API |
 | `auth.py`      | password hash + sessions (`~/.gpuviz/auth.json`) |
+| `groups.py`    | project folders for jobs (`~/.gpuviz/groups.json`) |
 | `slurm.py`     | nodes / jobs / qos / partitions / actions |
 | `catalog.py`   | read a repo's `gpuviz.toml` |
 | `projects.py`  | repo registry (`~/.gpuviz/projects.json`) |

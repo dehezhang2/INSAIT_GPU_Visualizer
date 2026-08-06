@@ -166,6 +166,21 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 6px var(--side-w,380px);ga
 .tip .tsub{color:var(--muted);font-size:10px;margin-top:2px}
 
 .empty{color:var(--muted);text-align:center;padding:24px;font-size:12px}
+.empty.sm{padding:6px;font-size:11px;text-align:left}
+
+/* project folders (Jobs tab) */
+.folder{margin-bottom:12px}
+.folder-head{display:flex;align-items:center;gap:8px;padding:5px 8px;background:var(--panel);
+  border:1px solid var(--line);border-radius:7px;cursor:pointer;user-select:none}
+.folder-head .caret{font-size:10px;color:var(--muted);transition:transform .12s}
+.folder.closed .caret{transform:rotate(-90deg)}
+.folder-head .fname{font-weight:600}
+.folder-head .fsum{font-size:11px;color:var(--muted)}
+.folder-head .fspace{flex:1}
+.folder-head.drop{border-color:var(--accent);box-shadow:0 0 0 2px rgba(79,156,249,.35)}
+.folder-body{margin:6px 0 0 6px;padding-left:8px;border-left:2px solid var(--line)}
+.folder-body .card{margin-bottom:8px}
+.folder.closed .folder-body{display:none}
 .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--panel);
   border:1px solid var(--line);border-radius:8px;padding:10px 16px;z-index:50;font-size:13px;
   box-shadow:0 6px 24px rgba(0,0,0,.5)}

@@ -18,12 +18,13 @@ import os
 import re
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import auth
 import catalog
 import deps
 import drafts
+import groups
 import logs
 import migrate
 import monitors
@@ -169,10 +170,15 @@ class Handler(BaseHTTPRequestHandler):
                 if o:
                     j["origin"] = {"project": o.get("project"), "job_key": o.get("job_key"),
                                    "submission_id": o.get("id")}
+            g = groups.snapshot()
+            for j in jobs:
+                j["folder"] = groups.resolve(j["job_id"], j.get("name"),
+                                             (j.get("origin") or {}).get("project"), g)
             return self._json({
                 "me": slurm.USER, "site": slurm.current_site(),
                 "nodes": slurm.nodes(), "jobs": jobs, "finished": fin,
                 "partitions": slurm.usable_gpu_partitions(),
+                "folders": g["folders"],
             })
         if path == "/api/qos":
             return self._json({"qos": slurm.my_qos()})
@@ -272,6 +278,10 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/monitors/([\w.:-]+)", path)
         if m:
             return self._json({"ok": monitors.delete(m.group(1))})
+        m = re.fullmatch(r"/api/groups/(.+)", path)
+        if m:
+            ok = groups.delete(unquote(m.group(1)))
+            return self._json({"ok": ok}, 200 if ok else 404)
         return self._json({"error": "not found"}, 404)
 
     # -- POST / PUT -------------------------------------------------------
@@ -325,6 +335,24 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": transfer.abort(int(m.group(1)))})
         if path == "/api/transfers/clear":
             transfer.clear_finished()
+            return self._json({"ok": True})
+
+        # ---- project folders (job grouping) ------------------------------
+        if path == "/api/groups":
+            try:
+                return self._json({"folder": groups.create(body.get("name"))})
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+        if path == "/api/groups/rename":
+            try:
+                ok = groups.rename(body.get("old") or "", body.get("new"))
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+            return self._json({"ok": ok}, 200 if ok else 404)
+        if path == "/api/groups/assign":
+            if not body.get("job_id"):
+                return self._json({"error": "job_id required"}, 400)
+            groups.assign(body["job_id"], body.get("name"), body.get("folder"))
             return self._json({"ok": True})
 
         # ---- external progress monitors ---------------------------------
@@ -444,6 +472,8 @@ class Handler(BaseHTTPRequestHandler):
         path = drafts.write_sbatch_file(d)
         job_id = slurm.submit(path, workdir=workdir)
         drafts.mark_submitted(did, job_id)
+        if d.get("project"):
+            groups.assign(job_id, d.get("name"), d["project"])
         return self._json({"ok": True, "job_id": job_id})
 
 

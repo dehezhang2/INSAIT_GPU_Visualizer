@@ -15,6 +15,11 @@ FIELD_HELP: dict[str, dict] = {
         "what": "任务名,会显示在 squeue 里。只影响可读性,不影响调度。",
         "example": "sft_internvl_aug",
     },
+    "project": {
+        "flag": "(仅 GUI,非 sbatch 参数)",
+        "what": "提交后任务归入 Jobs 页的哪个 project 文件夹。留空=未分组,之后也可拖动归类。",
+        "example": "conesplat",
+    },
     "gpus": {
         "flag": "--gres=gpu:N",
         "what": "每个节点要几张 GPU。配合 gpu_type 会变成 --gres=gpu:<type>:N。",

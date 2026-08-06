@@ -61,7 +61,14 @@
       <div id="projectsBody"></div>
     </div>
 
-    <div id="tab-jobs" class="tab-body hidden"><div id="jobsBody">loading…</div></div>
+    <div id="tab-jobs" class="tab-body hidden">
+      <div class="addrow">
+        <input id="newFolderName" placeholder="新建 project 文件夹">
+        <button class="btn" id="addFolderBtn">+ Folder</button>
+      </div>
+      <p class="hint">任务按 project 分组;拖任务卡到分组标题即可归类(同名任务以后自动归入同组),拖到「未分组」取消。Ad-hoc 草稿也可以拖过来设置 project。</p>
+      <div id="jobsBody">loading…</div>
+    </div>
 
     <div id="tab-queue" class="tab-body hidden">
       <div class="addrow">

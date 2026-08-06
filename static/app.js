@@ -372,10 +372,51 @@ async function doSubmit(){
 // JOBS (management)
 // ===========================================================================
 function liveJobs(){ return STATE.jobs.filter(j=>!TERMINAL.has(j.state)&&!FINISHED.has(String(j.id))); }
+let FOLD_CLOSED=new Set(JSON.parse(localStorage.gpuvizFoldClosed||"[]"));
+function saveFold(){ localStorage.gpuvizFoldClosed=JSON.stringify([...FOLD_CLOSED]); }
 function renderJobs(){
   const body=$("#jobsBody"); const list=liveJobs(); $("#jobsCount").textContent=list.length;
-  if(!list.length){ body.innerHTML='<div class="empty">没有运行/排队任务</div>'; return; }
-  body.innerHTML=""; for(const j of list) body.appendChild(jobCard(j));
+  body.innerHTML="";
+  const folders=[...new Set([...(STATE.folders||[]),...list.map(j=>j.folder).filter(Boolean)])];
+  if(!folders.length&&!list.length){ body.innerHTML='<div class="empty">没有运行/排队任务</div>'; return; }
+  if(!folders.length){ for(const j of list) body.appendChild(jobCard(j)); return; }  // 没建过文件夹 → 保持平铺
+  const by={}, loose=[];
+  for(const j of list){ if(j.folder) (by[j.folder]=by[j.folder]||[]).push(j); else loose.push(j); }
+  for(const f of folders) body.appendChild(folderSection(f,by[f]||[]));
+  body.appendChild(folderSection(null,loose));
+}
+function folderSection(name,jobs){
+  const label=name||"未分组";
+  const sec=ce("section","folder"+(name&&FOLD_CLOSED.has(name)?" closed":""));
+  const head=ce("div","folder-head");
+  const gpuSum=jobs.reduce((s,j)=>s+(j.gpus||0),0);
+  head.innerHTML=`<span class="caret">▾</span><span class="fname">${esc(label)}</span><span class="pill">${jobs.length}</span>`+
+    (gpuSum?`<span class="fsum">${gpuSum} GPU</span>`:"")+`<span class="fspace"></span>`;
+  if(name){
+    const ren=btn("✎","sm ghost",e=>{ e.stopPropagation(); const nn=(prompt(`重命名文件夹「${name}」为:`,name)||"").trim();
+      if(nn&&nn!==name) api.post("/api/groups/rename",{old:name,new:nn}).then(refresh).catch(er=>toast(er.message,"bad")); });
+    ren.title="重命名";
+    const del=btn("✕","sm ghost danger",e=>{ e.stopPropagation();
+      if(confirm(`删除文件夹「${name}」?任务回到未分组,不影响 Slurm 任务本身。`))
+        api.del(`/api/groups/${encodeURIComponent(name)}`).then(refresh).catch(er=>toast(er.message,"bad")); });
+    del.title="删除文件夹";
+    head.appendChild(ren); head.appendChild(del);
+    head.onclick=()=>{ FOLD_CLOSED.has(name)?FOLD_CLOSED.delete(name):FOLD_CLOSED.add(name); saveFold(); renderJobs(); };
+  }
+  head.addEventListener("dragover",e=>{ const d=window.__drag; if(d&&(d.type==="job"||d.type==="draft")){ e.preventDefault(); head.classList.add("drop"); }});
+  head.addEventListener("dragleave",()=>head.classList.remove("drop"));
+  head.addEventListener("drop",async e=>{ e.preventDefault(); head.classList.remove("drop"); const d=window.__drag; if(!d) return;
+    try{
+      if(d.type==="job"){ await api.post("/api/groups/assign",{job_id:d.job.job_id,name:d.job.name,folder:name||""}); toast(`${d.job.id} → ${label}`,"good"); refresh(); }
+      else if(d.type==="draft"){ await api.post(`/api/drafts/${d.draft.id}`,{project:name||""}); toast(`草稿「${d.draft.name}」→ ${label}`,"good"); loadDrafts(); }
+    }catch(er){ toast(er.message,"bad"); }
+  });
+  sec.appendChild(head);
+  const bd=ce("div","folder-body");
+  if(!jobs.length) bd.innerHTML='<div class="empty sm">空 — 拖任务卡到标题归类</div>';
+  else for(const j of jobs) bd.appendChild(jobCard(j));
+  sec.appendChild(bd);
+  return sec;
 }
 function jobCard(j){
   const c=ce("div","card");
@@ -701,7 +742,9 @@ function renderDrafts(){
     c.draggable=true; c.addEventListener("dragstart",()=>{window.__drag={type:"draft",draft:d};}); c.addEventListener("dragend",()=>{window.__drag=null;});
     const n=Math.max(1,Math.min(8,+d.gpus||1));
     const top=ce("div","card-top");
-    top.innerHTML=`<span class="gpublock">${"<i></i>".repeat(n)}</span><span class="jname">${esc(d.name)}</span>${d.submitted_job_id?`<span class="state RUNNING">→ ${d.submitted_job_id}</span>`:""}`;
+    top.innerHTML=`<span class="gpublock">${"<i></i>".repeat(n)}</span><span class="jname">${esc(d.name)}</span>`+
+      (d.project?`<span class="origin" title="project 文件夹">${esc(d.project)}</span>`:"")+
+      `${d.submitted_job_id?`<span class="state RUNNING">→ ${d.submitted_job_id}</span>`:""}`;
     c.appendChild(top);
     const meta=ce("div","card-meta"); meta.innerHTML=`<span>${d.gpus}×${d.gpu_type||"gpu"}</span><span>${d.partition||""} · ${d.time||""}</span>${d.nodelist?`<span>📍${d.nodelist}</span>`:""}`;
     c.appendChild(meta);
@@ -716,7 +759,7 @@ async function submitDraft(d){ if(!confirm(`提交「${d.name}」?`)) return; tr
 async function delDraft(d){ if(!confirm(`删除「${d.name}」?`)) return; await api.del(`/api/drafts/${d.id}`); loadDrafts(); }
 
 // draft editor (full sbatch fields)
-const FIELDS=[["name","Name","text"],["gpus","GPUs","number"],["gpu_type","GPU type","gtype"],["nodes","Nodes","number"],
+const FIELDS=[["name","Name","text"],["project","Project","text"],["gpus","GPUs","number"],["gpu_type","GPU type","gtype"],["nodes","Nodes","number"],
   ["cpus","CPUs","number"],["mem","Mem","text"],["time","Time","text"],["partition","Partition","text"],
   ["qos","QOS","text"],["nodelist","Nodelist","text"],["output","Output","text",1],["script","Script","textarea",1]];
 let editing=null,prevTimer=null;
@@ -828,6 +871,9 @@ function wire(){
   document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>switchTab(t.dataset.tab));
   $("#addProjBtn").onclick=async()=>{ const p=$("#projPath").value.trim(); if(!p) return; try{ await api.post("/api/projects",{path:p}); $("#projPath").value=""; loadProjects(); }catch(e){ toast(e.message,"bad"); } };
   $("#projPath").addEventListener("keydown",e=>{ if(e.key==="Enter") $("#addProjBtn").click(); });
+  $("#addFolderBtn").onclick=async()=>{ const n=$("#newFolderName").value.trim(); if(!n) return;
+    try{ await api.post("/api/groups",{name:n}); $("#newFolderName").value=""; refresh(); }catch(e){ toast(e.message,"bad"); } };
+  $("#newFolderName").addEventListener("keydown",e=>{ if(e.key==="Enter") $("#addFolderBtn").click(); });
   $("#clearFinBtn").onclick=()=>{ for(const k of FINISHED.keys()) FIN_GONE.add(k); FINISHED.clear(); renderFinished(); };
   $("#clearMigBtn").onclick=async()=>{ await Promise.all([api.post("/api/migrations/clear",{}),api.post("/api/transfers/clear",{}),api.post("/api/monitors/clear",{})]); loadMigrations(); };
   // submit modal
